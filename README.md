@@ -56,6 +56,15 @@ netverdict analyze capture.pcapng
 netverdict analyze capture.pcapng --json          # sortie machine
 netverdict analyze capture.pcapng --explain       # + synthese narrative (API Claude)
 
+# v1.1 : croiser avec ce qui a change dans l'infra (timeline)
+netverdict analyze capture.pcapng --events events.xml --syslog fw01.log
+#   --events : events Windows (.evtx avec l'extra [evtx], ou export XML :
+#              wevtutil qe System /f:xml > events.xml)
+#   --syslog : fichiers syslog plats (RFC3164/RFC5424 melanges acceptes)
+# Le rapport ajoute les changements des 15 min precedant la capture
+# (service installe, regle firewall rechargee, passage sur batterie...)
+# et marque ceux qui precedent l'incident de peu.
+
 # Capture assistee : trafic + etat hote en un coup (console admin/root)
 netverdict capture --duration 60                  # Windows: pktmon (natif) / Linux: tcpdump
 
@@ -104,11 +113,16 @@ Ajouter ses propres regles : `netverdict analyze ... --rules mes_regles.yaml`
 - Sens client/serveur estime par heuristique si la capture demarre en pleine
   session (signale dans le rapport).
 - Le snapshot hote vient d'une seule machine (celle ou on a lance la capture).
+- Syslog RFC3164 (sans fuseau) : l'heure est interpretee dans le fuseau du
+  poste d'analyse. Une source en UTC analysee depuis un poste en heure
+  locale peut se decaler de la fenetre — les horodatages concernes sont
+  marques `~` dans le rapport. Une option --syslog-tz est au backlog.
 
 ## Roadmap
 
-- v1.1 : timeline multi-sources — events Windows (EVTX) + syslog pour
-  repondre a "qu'est-ce qui a change dans l'infra juste avant ?".
+- v1.1 (fait) : timeline multi-sources — events Windows (EVTX/XML) + syslog
+  pour repondre a "qu'est-ce qui a change dans l'infra juste avant ?".
+- v1.2 : --syslog-tz, correlation fine changement->verdict.
 - v2 : capture pilotee des deux cotes (client ET serveur) et comparaison.
 
 ## Licence

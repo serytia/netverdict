@@ -18,6 +18,7 @@ from rich.text import Text
 from .pcap import Capture
 from .rules.engine import FlowVerdict
 from .hostsnap import HostSnapshot
+from .timeline import Timeline
 
 VERDICT_STYLE = {
     "RESEAU": "bold red",
@@ -40,9 +41,88 @@ def _sort_key(fv: FlowVerdict) -> tuple:
     return (0, -fv.primary.rule.priority)
 
 
+def _fmt_ts(ts: float, tz_known: bool) -> str:
+    """Heure locale lisible ; '~' devant si le fuseau source etait inconnu
+    (RFC3164) — l'admin doit savoir que la minute peut etre fausse.
+
+    Jamais via datetime.fromtimestamp(ts) directement : sous Windows il leve
+    OSError pour tout ts negatif (pcap a l'epoch 1970, SystemTime 1601 d'un
+    FILETIME vide) et le rapport entier planterait sur UN horodatage pourri.
+    """
+    from datetime import datetime, timedelta, timezone
+    mark = "" if tz_known else "~"
+    try:
+        dt = (datetime(1970, 1, 1, tzinfo=timezone.utc)
+              + timedelta(seconds=ts)).astimezone()
+        return mark + dt.strftime("%H:%M:%S")
+    except (OverflowError, OSError, ValueError):
+        return f"{mark}@{ts:.0f}"
+
+
+def render_timeline(tl: Timeline, incident_ts: Optional[float],
+                    con: Console, windowed: bool, top: int = 10) -> None:
+    """Section « qu'est-ce qui a change » : les changements d'infra de la
+    fenetre, les plus recents d'abord. On TRIE par pertinence, on ne conclut
+    pas a la causalite — un changement qui precede l'incident est un suspect
+    a verifier, pas un coupable.
+
+    Appelee DES QUE des sources ont ete fournies, meme si la fenetre est
+    vide : le silence est le pire des rapports quand l'admin a donne des
+    logs a lire (il conclurait « rien n'a change » au lieu de « rien n'a
+    ete retenu/lu »)."""
+    if windowed:
+        con.print(Text("Changements dans l'infra (fenetre de la capture) :",
+                       style="bold"))
+    else:
+        con.print(Text("Changements dans l'infra — fenetre NON appliquee "
+                       "(capture sans paquet TCP date) :", style="bold"))
+    changes = tl.changes()
+    if not changes:
+        con.print(Text("  aucun changement detecte dans la fenetre — les "
+                       "sources fournies n'expliquent pas l'incident par un "
+                       "changement recent", style="dim"))
+    for e in changes[:top]:
+        line = Text()
+        line.append(f"  {_fmt_ts(e.ts, e.tz_known)}  ")
+        line.append(f"[{e.category}] ", style="bold cyan")
+        line.append(f"{e.host} — {e.message} ")
+        line.append(f"({e.source}:{e.ident})", style="dim")
+        # Suspect : changement qui precede de peu le debut de l'incident.
+        # Sur un timestamp sans fuseau fiable, pas de delta a la seconde :
+        # afficher une precision qu'on n'a pas serait mentir.
+        if incident_ts is not None and 0 <= incident_ts - e.ts <= 300:
+            delta = incident_ts - e.ts
+            if e.tz_known:
+                line.append(f"  << precede l'incident de {delta:.0f}s",
+                            style="bold yellow")
+            else:
+                line.append(f"  << precede l'incident d'environ "
+                            f"{max(1, round(delta / 60)):.0f} min (heure "
+                            f"source approximative)", style="bold yellow")
+        con.print(line)
+    if len(changes) > top:
+        con.print(Text(f"  ... {len(changes) - top} autre(s) changement(s) "
+                       f"masque(s) — --top pour en voir plus", style="dim"))
+    # O(n) par categorie — jamais de comparaison d'objets sur les listes
+    # completes (quadratique sur un gros syslog central).
+    from .timeline import CHANGE_CATEGORIES
+    errors = sum(1 for e in tl.events
+                 if e.category not in CHANGE_CATEGORIES and e.severity >= 2)
+    if errors:
+        con.print(Text(f"  + {errors} erreur(s) hors changement dans "
+                       f"la fenetre (--json pour le detail)", style="dim"))
+    for name, st in tl.stats.items():
+        note = f"{st.parsed}/{st.total_lines} entrees lues"
+        if st.unparsed:
+            note += f", {st.unparsed} illisibles"
+        con.print(Text(f"  {name}: {note}", style="dim"))
+    con.print()
+
+
 def render_console(cap: Capture, verdicts: list[FlowVerdict],
                    snapshot: Optional[HostSnapshot] = None,
-                   top: int = 10, console: Optional[Console] = None) -> None:
+                   top: int = 10, console: Optional[Console] = None,
+                   timeline: Optional[Timeline] = None) -> None:
     con = console or Console()
     st = cap.stats
 
@@ -109,6 +189,16 @@ def render_console(cap: Capture, verdicts: list[FlowVerdict],
                      style="dim")
         con.print(Panel(body, title=title, border_style=style.split()[-1]))
 
+    if timeline is not None:
+        # L'« incident » = debut du premier flux a verdict non-RAS : les
+        # changements qui le precedent de peu sont les suspects a verifier.
+        incident_ts = min((fv.signals.t_first for fv in ordered
+                           if fv.primary and fv.verdict != "RAS"),
+                          default=None)
+        con.print()
+        render_timeline(timeline, incident_ts, con,
+                        windowed=timeline.windowed, top=top)
+
     hidden = sum(1 for fv in ordered
                  if fv.primary and fv.verdict != "RAS") - shown
     if hidden > 0:
@@ -125,7 +215,8 @@ def render_console(cap: Capture, verdicts: list[FlowVerdict],
 
 
 def to_json(cap: Capture, verdicts: list[FlowVerdict],
-            snapshot: Optional[HostSnapshot] = None) -> str:
+            snapshot: Optional[HostSnapshot] = None,
+            timeline: Optional[Timeline] = None) -> str:
     st = cap.stats
     out = {
         "netverdict": 1,
@@ -159,4 +250,17 @@ def to_json(cap: Capture, verdicts: list[FlowVerdict],
                     "process_cpu_pct": ctx.process_cpu_pct,
                 }
         out["flows"].append(entry)
+    if timeline is not None:
+        out["timeline"] = {
+            "windowed": timeline.windowed,
+            "events": [{
+                "ts": e.ts, "source": e.source, "host": e.host,
+                "category": e.category, "severity": e.severity,
+                "ident": e.ident, "message": e.message,
+                "tz_known": e.tz_known,
+            } for e in timeline.events],
+            "stats": {k: {"total_lines": v.total_lines, "parsed": v.parsed,
+                          "unparsed": v.unparsed}
+                      for k, v in timeline.stats.items()},
+        }
     return json.dumps(out, indent=2, ensure_ascii=False)

@@ -61,6 +61,7 @@ class FlowSignals:
     sport: int = 0
     direction_confident: bool = True
     started_midstream: bool = False
+    t_first: float = 0.0             # epoch du premier paquet du flux
     duration_s: float = 0.0
     pkts_total: int = 0
     bytes_c2s: int = 0
@@ -138,6 +139,7 @@ def compute_signals(fl: Flow) -> FlowSignals:
         return sig
 
     sig.pkts_total = len(pkts)
+    sig.t_first = pkts[0].pkt.ts
     sig.duration_s = pkts[-1].pkt.ts - pkts[0].pkt.ts
     first = pkts[0].pkt
     sig.started_midstream = not (first.syn)

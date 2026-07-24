@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "netverdict"
-version = "0.1.0"
+version = "0.2.0"
 description = "Triage d'incident reseau/app/OS : analyse une capture et rend un verdict argumente avec preuves"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -24,6 +24,9 @@ dev = ["pytest>=8.0"]
 # La couche --explain (API Claude) est un extra : l'outil complet fonctionne
 # sans, et un poste d'admin sans cle API n'a pas a tirer le SDK.
 explain = ["anthropic>=0.60"]
+# Lecture directe des .evtx binaires. Sans cet extra, --events accepte
+# toujours l'export XML wevtutil (natif Windows, zero dependance).
+evtx = ["python-evtx>=0.8"]
 
 [project.scripts]
 netverdict = "netverdict.cli:main"
