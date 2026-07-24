@@ -124,21 +124,35 @@ sc_rst() {
 }
 
 sc_loss() {
-    log "loss : 8 % de perte netem + transfert de 2 Mo"
+    log "loss : 8 % de perte netem sur un UPLOAD de 2 Mo"
+    # Subtilite de placement : la capture est sur veth0 (cote hote). Pour
+    # qu'une retransmission soit VISIBLE dans la capture il faut voir les
+    # deux exemplaires — donc la perte doit frapper APRES le point de
+    # capture. netem root sur veth0 = egress hote->ns : ce sont les DATA
+    # d'un upload client qui doivent passer par la (un download perdrait
+    # surtout des ACKs, presque sans retransmission observable).
     setup_net
     tc qdisc add dev veth0 root netem loss 8% delay 5ms
     srv_python '
 import http.server
 class H(http.server.BaseHTTPRequestHandler):
-    def do_GET(self):
-        body = b"z" * (2 * 1024 * 1024)
-        self.send_response(200); self.send_header("Content-Length", len(body))
-        self.end_headers(); self.wfile.write(body)
+    def do_PUT(self):
+        n = int(self.headers.get("Content-Length", 0))
+        read = 0
+        while read < n:
+            chunk = self.rfile.read(min(65536, n - read))
+            if not chunk: break
+            read += len(chunk)
+        self.send_response(201); self.send_header("Content-Length", "0")
+        self.end_headers()
     def log_message(self, *a): pass
 http.server.HTTPServer(("10.99.0.2", 8080), H).serve_forever()'
+    dd if=/dev/urandom of=/tmp/netverdict-big bs=1M count=2 2>/dev/null
     start_capture loss
-    curl -s -o /dev/null --max-time 60 "http://$SRV_IP:$PORT/" || true
+    curl -s -T /tmp/netverdict-big -o /dev/null --max-time 60 \
+        "http://$SRV_IP:$PORT/upload" || true
     stop_capture; kill_srv
+    rm -f /tmp/netverdict-big
     tc qdisc del dev veth0 root 2>/dev/null || true
 }
 
