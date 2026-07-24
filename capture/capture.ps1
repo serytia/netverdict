@@ -51,7 +51,13 @@ if ($TargetPort -gt 0) { pktmon filter add -p $TargetPort | Out-Null }
 
 $pktSize = if ($FullPackets) { 0 } else { 128 }
 Write-Host "Capture pktmon ${DurationSec}s (pkt-size=$pktSize) -> $etl"
-pktmon start --capture --pkt-size $pktSize --file-name $etl | Out-Null
+# --comp nics : capturer au niveau des cartes reseau UNIQUEMENT. Par defaut
+# pktmon capture a CHAQUE couche NDIS -> le meme paquet apparait plusieurs
+# fois et fabrique de faux echantillons RTT (~0 ms) dans l'analyse
+# (constate sur capture reelle). Limite connue et assumee : le trafic
+# loopback pur (127.0.0.1) est invisible a pktmon de toute facon — le TCP
+# Loopback Fast Path de Windows court-circuite la pile NDIS.
+pktmon start --capture --comp nics --pkt-size $pktSize --file-name $etl | Out-Null
 
 # --- Snapshot hote au milieu de la fenetre de capture -----------------------
 Start-Sleep -Seconds ([math]::Max(1, [int]($DurationSec / 2)))

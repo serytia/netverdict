@@ -59,12 +59,9 @@ class HostSnapshot:
     def __init__(self, data: dict):
         self.data = data
         self.host = data.get("host", "?")
-        self._by_local_port: dict[int, dict] = {}
+        self._by_local_port: dict[int, list[dict]] = {}
         for c in data.get("connections", []):
-            # Plusieurs connexions partagent le port local d'un service en
-            # ecoute ; elles pointent toutes vers le meme process, la
-            # premiere suffit.
-            self._by_local_port.setdefault(int(c.get("local_port", -1)), c)
+            self._by_local_port.setdefault(int(c.get("local_port", -1)), []).append(c)
         self._cpu_by_pid = {int(t["pid"]): float(t.get("cpu_pct", 0))
                             for t in data.get("top_cpu", []) if "pid" in t}
 
@@ -74,10 +71,25 @@ class HostSnapshot:
         # s'etrangle dessus ; -sig tolere les deux formes.
         return cls(json.loads(Path(path).read_text(encoding="utf-8-sig")))
 
+    _WILDCARDS = {"0.0.0.0", "::", ""}
+
+    def _lookup(self, ip: str, port: int) -> Optional[dict]:
+        """Le PORT seul ne suffit pas : un port-forward local (VBoxHeadless,
+        ssh -L, docker-proxy) ecoute le meme numero qu'un service distant et
+        se ferait attribuer le flux a tort (constate sur capture reelle).
+        L'IP locale doit correspondre a l'extremite du flux ; une ecoute
+        wildcard reste acceptee, une IP differente est rejetee."""
+        for c in self._by_local_port.get(port, []):
+            local_ip = str(c.get("local_ip", ""))
+            if local_ip == ip or local_ip in self._WILDCARDS:
+                return c
+        return None
+
     def context_for(self, sig: FlowSignals) -> Optional[HostContext]:
-        """Le snapshot vient d'UNE machine : on matche par le port local,
+        """Le snapshot vient d'UNE machine : on matche (ip, port) locaux,
         cote serveur (cas le plus courant) puis cote client."""
-        conn = self._by_local_port.get(sig.sport) or self._by_local_port.get(sig.cport)
+        conn = (self._lookup(sig.server, sig.sport)
+                or self._lookup(sig.client, sig.cport))
         pid = conn.get("pid") if conn else None
         return HostContext(
             host=self.host,

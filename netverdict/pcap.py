@@ -160,6 +160,17 @@ def _ip_from_frame(buf: bytes, linktype: int):
         # mais un QinQ ou un ethertype inconnu laisse des bytes bruts.
         if isinstance(ip, (dpkt.ip.IP, dpkt.ip6.IP6)):
             return ip
+        # pktmon etl2pcap declare "Ethernet" mais ecrit du RAW IP pour les
+        # paquets captes aux couches NDIS sans en-tete Ethernet (loopback,
+        # composants IP) — constate sur capture reelle : trames commencant
+        # par 0x45. Si l'interpretation Ethernet ne donne pas d'IP et que le
+        # premier nibble est une version IP plausible, on retente en brut.
+        if buf and (buf[0] >> 4) in (4, 6):
+            try:
+                return (dpkt.ip.IP(buf) if buf[0] >> 4 == 4
+                        else dpkt.ip6.IP6(buf))
+            except Exception:
+                return None
         return None
     if linktype in (LINKTYPE_LINUX_SLL,):
         sll = dpkt.sll.SLL(buf)
