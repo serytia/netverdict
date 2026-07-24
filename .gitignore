@@ -13,4 +13,5 @@ build/
 *.pcapng
 *.etl
 !tests/fixtures/*.pcap
+!tests/fixtures/lab/*.pcap
 snapshot*.json

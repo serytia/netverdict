@@ -46,6 +46,11 @@ def _pctl(samples: list[float], q: float) -> Optional[float]:
 # fabriquerait de la fausse perte sur toute session longue et calme.
 _KEEPALIVE_MAX_LEN = 1
 
+# Un segment qui n'avance pas la fenetre mais arrive dans cette fenetre
+# apres le dernier octet le plus haut est du REORDONNANCEMENT de capture,
+# pas une retransmission (meme heuristique que Wireshark).
+_OOO_WINDOW_S = 0.003
+
 
 @dataclass
 class FlowSignals:
@@ -145,15 +150,19 @@ def compute_signals(fl: Flow) -> FlowSignals:
     syn_times: list[float] = []
     synack_times: list[float] = []
 
-    # Etat retrans/rtt par sens : seen={(seq,len)}, pending={seq_end: ts},
-    # invalid={seq_end retransmis} (algo de Karn : un segment reemis ne donne
-    # jamais d'echantillon RTT, on ne sait pas quel exemplaire l'ACK couvre).
+    # Etat retrans/rtt par sens. La detection de retransmission suit la
+    # FENETRE (max_seq_end), pas l'identite (seq,len) des segments : avec
+    # TSO/GSO l'original part en mega-segment et la retransmission revient
+    # re-decoupee en segments MSS — une comparaison exacte ne revoit jamais
+    # le meme couple et rate 100 % des pertes (constate sur capture kernel
+    # au lab, 2026-07-24). Regle : un segment de donnees qui n'avance pas
+    # max_seq_end transporte des octets deja emis -> retransmission, sauf
+    # arrivee dans la fenetre de reordonnancement (_OOO_WINDOW_S).
     class _Dir:
         def __init__(self):
-            self.seen: set[tuple[int, int]] = set()
-            self.pending: dict[int, float] = {}
-            self.invalid: set[int] = set()
+            self.pending: dict[int, float] = {}      # seq_end -> ts (RTT)
             self.max_seq_end: Optional[int] = None
+            self.t_max_seq: float = 0.0              # ts du plus haut octet emis
             self.last_ack: Optional[int] = None
             self.last_win: Optional[int] = None
             self.dup_run = 0
@@ -216,29 +225,34 @@ def compute_signals(fl: Flow) -> FlowSignals:
             is_keepalive = (p.payload_len <= _KEEPALIVE_MAX_LEN
                             and me.max_seq_end is not None
                             and seq_end == me.max_seq_end)
-            key = (p.seq, p.payload_len)
+            is_old_data = (me.max_seq_end is not None
+                           and seq_le(seq_end, me.max_seq_end))
             if is_keepalive:
                 pass
-            elif key in me.seen:
-                if op.from_client:
-                    sig.retrans_c2s += 1
-                else:
-                    sig.retrans_s2c += 1
-                # Karn : l'echantillon RTT de ce segment est invalide.
-                me.pending.pop(seq_end, None)
-                me.invalid.add(seq_end)
+            elif is_old_data:
+                if (p.ts - me.t_max_seq) >= _OOO_WINDOW_S:
+                    if op.from_client:
+                        sig.retrans_c2s += 1
+                    else:
+                        sig.retrans_s2c += 1
+                    # Karn : tout echantillon RTT contenant des octets
+                    # retransmis devient inutilisable (on ne saura pas quel
+                    # exemplaire l'ACK acquitte).
+                    first_retrans_byte = seq_add(p.seq, 1)
+                    for se in [se for se in me.pending
+                               if seq_le(first_retrans_byte, se)]:
+                        me.pending.pop(se, None)
+                # sinon : reordonnancement de capture, pas une perte
             else:
-                me.seen.add(key)
                 if op.from_client:
                     sig.data_pkts_c2s += 1
                     sig.bytes_c2s += p.payload_len
                 else:
                     sig.data_pkts_s2c += 1
                     sig.bytes_s2c += p.payload_len
-                if seq_end not in me.invalid:
-                    me.pending[seq_end] = p.ts
-                if me.max_seq_end is None or seq_le(me.max_seq_end, seq_end):
-                    me.max_seq_end = seq_end
+                me.pending[seq_end] = p.ts
+                me.max_seq_end = seq_end
+                me.t_max_seq = p.ts
 
             if not is_keepalive:
                 if op.from_client:

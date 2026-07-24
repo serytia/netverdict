@@ -43,13 +43,24 @@ setup_net() {
 
 # start_capture <name> ; stop_capture — en-tetes seuls, comme l'outil le veut
 start_capture() {
-    tcpdump -i veth0 -s 96 -w "$OUT/$1.pcap" tcp or icmp >/dev/null 2>&1 &
+    # Deux couches de buffering a neutraliser pour les scenarios courts
+    # (rst : SYN->RST en ~1 ms) — diagnostique par matrice de variantes :
+    # 1. le ring buffer de capture KERNEL livre par blocs avec un timeout
+    #    d'environ 1-2 s sur une capture calme -> --immediate-mode ;
+    # 2. le buffer d'ECRITURE stdio de tcpdump -> -U (packet-buffered).
+    # Sans ca, un kill 0.5 s apres l'echange produit un pcap VIDE alors que
+    # les paquets ont bien ete captes (ils sont encore dans le kernel).
+    tcpdump -i veth0 --immediate-mode -s 96 -U -w "$OUT/$1.pcap" \
+        tcp or icmp >/dev/null 2>&1 &
     TCPDUMP_PID=$!
-    sleep 0.5
+    # 1.2 s : tcpdump met parfois >0.5 s a s'armer (compilation BPF, promisc).
+    sleep 1.2
 }
 stop_capture() {
-    sleep 0.5
-    kill "$TCPDUMP_PID" 2>/dev/null; wait "$TCPDUMP_PID" 2>/dev/null
+    # 2 s : filet si --immediate-mode manque (vieux tcpdump) — laisse le
+    # timeout de bloc kernel expirer avant d'arreter la capture.
+    sleep 2
+    kill -INT "$TCPDUMP_PID" 2>/dev/null; wait "$TCPDUMP_PID" 2>/dev/null
 }
 
 srv_python() {  # lance un python3 dans le netns serveur, PID dans SRV_PID
