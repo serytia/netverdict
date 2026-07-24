@@ -1,0 +1,277 @@
+# Regles de verdict embarquees — v1.
+#
+# Philosophie (heritee des packs Wazuh du meme auteur) :
+#   - une regle = de la donnee declarative, pas du code
+#   - la description interpolee EST la phrase de preuve montree a l'admin
+#   - la remediation est REDIGEE A LA MAIN : jamais generee, jamais vague
+#   - les seuils sont commentes avec leur justification — un seuil sans
+#     justification est un seuil qu'on n'osera jamais modifier
+#
+# Verdicts : RESEAU | APP | OS | HOTE (app-ou-OS indiscernable sans snapshot)
+#            | AMBIGU | RAS
+# Priorite : plus haut = affiche en premier ; les autres matches restent
+#            visibles comme signaux secondaires.
+
+rules:
+
+  # ---------------------------------------------------------------- filtrage
+  - id: reject-icmp
+    verdict: RESEAU
+    priority: 92
+    confidence: haute
+    title: "Connexion REFUSEE explicitement par un equipement (REJECT)"
+    when:
+      all:
+        - "icmp_admin_prohibited == true"
+    evidence:
+      - "ICMP administratively-prohibited emis par {icmp_admin_prohibited_from} pour {client}:{cport} -> {server}:{sport}"
+    remediation: |
+      L'equipement {icmp_admin_prohibited_from} refuse ce trafic par politique
+      (REJECT). Ce n'est ni l'application ni le serveur : la regle de filtrage
+      est sur CET equipement. Chercher dans sa configuration la regle qui
+      matche ce couple source/destination/port, et verifier si le refus est
+      voulu (durcissement recent ?) ou une regle trop large.
+
+  - id: syn-no-answer
+    verdict: RESEAU
+    priority: 90
+    confidence: haute
+    title: "SYN sans aucune reponse : filtrage silencieux (DROP) ou hote injoignable"
+    when:
+      all:
+        # 2 SYN et plus = au moins ~1 s de retries : ce n'est pas une capture
+        # arretee trop tot, c'est un vrai silence.
+        - "syn_count >= 2"
+        - "synack_seen == false"
+        - "rst_to_syn == false"
+    unless:
+      # Si un REJECT explicite existe, la regle reject-icmp raconte mieux.
+      - "icmp_admin_prohibited == true"
+    evidence:
+      - "{syn_count} SYN de {client} vers {server}:{sport} etales sur {syn_span_s:.1f}s — aucun SYN/ACK, aucun RST, aucun ICMP"
+    remediation: |
+      Quelque chose sur le chemin jette les SYN sans repondre (politique DROP),
+      ou l'hote est injoignable. Verifier dans l'ordre :
+      1. Firewall local de {server} (profil actif, regle d'entree sur le port {sport})
+      2. Firewalls/ACL intermediaires sur le chemin aller
+      3. Route de RETOUR depuis {server} (asymetrie : l'aller passe, le retour
+         part ailleurs) — verifier la table de routage cote serveur
+      4. L'hote repond-il a autre chose (ICMP, autre port) ? Si non : probleme
+         de joignabilite (down, ARP, VLAN), pas de filtrage.
+
+  - id: rst-to-syn
+    verdict: APP
+    priority: 88
+    confidence: haute
+    title: "RST en reponse au SYN : rien n'ecoute sur ce port"
+    when:
+      all:
+        - "rst_to_syn == true"
+    evidence:
+      - "RST recu {rst_to_syn_ms:.1f} ms apres le SYN vers {server}:{sport}"
+    remediation: |
+      Le reseau fonctionne : le SYN est arrive et une pile TCP a repondu.
+      Mais aucun service n'ecoute sur {server}:{sport}. Verifier sur le serveur :
+      1. Le service est-il demarre ? (etat du process/service)
+      2. Ecoute-t-il sur le bon port et la bonne interface ?
+         (ss -tlnp / netstat -ano — un bind sur 127.0.0.1 au lieu de 0.0.0.0
+         est le classique du genre)
+      3. Un RST peut aussi venir d'un firewall en mode reject-with-rst :
+         si le service ecoute bel et bien, chercher un REJECT sur le chemin.
+
+  - id: mtu-blackhole
+    verdict: RESEAU
+    priority: 86
+    confidence: haute
+    title: "Probleme de MTU sur le chemin (fragmentation requise)"
+    when:
+      all:
+        - "icmp_frag_needed == true"
+    evidence:
+      - "ICMP 'fragmentation needed' recu pour le flux {client}:{cport} -> {server}:{sport}"
+    remediation: |
+      Un lien du chemin a une MTU plus petite (tunnel VPN, PPPoE, IPsec...) et
+      les gros segments ne passent pas. Symptome typique : la connexion
+      s'etablit, les petits echanges marchent, tout gele des qu'un gros
+      transfert demarre. Corriger par clamp du MSS sur l'equipement de tunnel
+      (ex : 1360 pour de l'IPsec) ou MTU coherente de bout en bout.
+
+  - id: zero-window-server
+    verdict: HOTE
+    priority: 85
+    confidence: haute
+    title: "Le serveur ne lit plus sa socket (zero window) : app ou OS sature"
+    when:
+      all:
+        # Une annonce isolee de quelques ms arrive dans la vie normale d'un
+        # buffer ; 100 ms fenetre fermee = l'application n'a pas consomme
+        # pendant 100 ms, ce n'est plus du reglage fin.
+        - "zw_from_server >= 1"
+        - "zw_max_ms >= 100"
+    evidence:
+      - "{zw_from_server} annonces zero-window de {server}, fenetre fermee jusqu'a {zw_max_ms:.0f} ms (cumul {zw_total_ms:.0f} ms)"
+    remediation: |
+      Le RESEAU EST HORS DE CAUSE : il a livre, c'est {server} qui ne consomme
+      pas. La socket du service n'est pas lue assez vite. Cote serveur,
+      au moment de l'incident :
+      1. CPU du process qui detient le port {sport} (thread bloque ? GC ?)
+      2. I/O disque (l'app qui ecrit de façon synchrone sur un disque sature
+         arrete de lire sa socket)
+      3. Swap / pression memoire.
+      Le snapshot hote de 'netverdict capture' donne exactement ces elements.
+
+  - id: slow-app-proven
+    verdict: APP
+    priority: 84
+    confidence: haute
+    title: "Reponse applicative lente, reception prouvee par ACK rapide"
+    when:
+      all:
+        - "handshake_complete == true"
+        - "exchanges >= 1"
+        - "ttfb_ms_p95 >= 500"
+        # La preuve : la pile TCP du serveur a acquitte la requete en <50 ms,
+        # la reponse a mis 10x plus. Le delai est DANS le serveur.
+        - "server_ack_delay_ms_p95 < 50"
+        - "retrans_rate < 0.01"
+    evidence:
+      - "{exchanges} echanges : ACK serveur en {server_ack_delay_ms_p95:.0f} ms mais reponse en {ttfb_ms_p50:.0f} ms (p50) / {ttfb_ms_p95:.0f} ms (p95), 0 perte"
+    remediation: |
+      Le reseau a livre la requete (ACK immediat) puis a attendu l'application.
+      Chercher COTE APPLICATIF de {server}:{sport} :
+      1. Temps de traitement interne (logs applicatifs au meme timestamp)
+      2. Dependances aval : base de donnees, API tierce, resolution DNS
+         faite PAR le serveur — le blocage est souvent un cran derriere
+      3. Pool de threads/connexions epuise (requetes en file d'attente).
+
+  - id: zero-window-client
+    verdict: HOTE
+    priority: 83
+    confidence: haute
+    title: "Le client ne lit plus sa socket (zero window) : poste/app cliente saturee"
+    when:
+      all:
+        - "zw_from_client >= 1"
+        - "zw_max_ms >= 100"
+    evidence:
+      - "{zw_from_client} annonces zero-window de {client}, fenetre fermee jusqu'a {zw_max_ms:.0f} ms"
+    remediation: |
+      C'est le POSTE CLIENT qui n'absorbe pas ce que le serveur envoie
+      (application cliente bloquee, machine saturee). Le reseau et le serveur
+      sont hors de cause. Verifier la charge du poste {client} et l'etat de
+      l'application au moment des plaintes.
+
+  - id: retrans-heavy
+    verdict: RESEAU
+    priority: 80
+    confidence: haute
+    title: "Perte de paquets significative sur le chemin"
+    when:
+      all:
+        # 3 % : un LAN sain vit sous 0.1 % ; a 3 % le debit s'effondre
+        # (TCP divise sa fenetre a chaque perte). Le plancher de 5 retrans
+        # evite de flagger 1 perte isolee sur un petit flux.
+        - "retrans_rate >= 0.03"
+        - "retrans_total >= 5"
+    evidence:
+      - "{retrans_total} retransmissions sur {pkts_total} paquets ({retrans_rate:.1%}) — c2s: {retrans_c2s}, s2c: {retrans_s2c}"
+      - "Rafales de dup-ACK : client {dup_ack_bursts_from_client}, serveur {dup_ack_bursts_from_server}"
+    remediation: |
+      Il y a de la perte sur le chemin. Le sens des retransmissions dit ou
+      chercher (c2s = perte vers le serveur, s2c = perte vers le client).
+      Causes classiques par ordre de frequence :
+      1. Lien sature (uplink, interco) : verifier l'utilisation des interfaces
+      2. Erreurs physiques : compteurs CRC/errors des switchs sur le chemin,
+         duplex mismatch, cable/SFP fatigue
+      3. Wi-Fi ou lien radio dans le chemin
+      4. Equipement qui drop en limite de capacite (CPU firewall, QoS).
+
+  - id: slow-app-likely
+    verdict: APP
+    priority: 78
+    confidence: moyenne
+    title: "Reponse applicative lente (sans preuve ACK separee)"
+    when:
+      all:
+        - "handshake_complete == true"
+        - "exchanges >= 1"
+        - "ttfb_ms_p95 >= 500"
+        - "retrans_rate < 0.01"
+        # Pas d'ACK pur observe avant la reponse (ACK piggyback) : on ne peut
+        # pas prouver que le delai est dans l'app, mais zero perte + transport
+        # propre rendent le reseau tres improbable.
+        - "server_ack_delay_ms_p95 == none"
+    evidence:
+      - "{exchanges} echanges, reponse en {ttfb_ms_p50:.0f} ms (p50) / {ttfb_ms_p95:.0f} ms (p95), transport propre (0 perte, RTT p50 {rtt_ms_p50:.1f} ms)"
+    remediation: |
+      Le transport est propre (pas de perte, RTT stable) mais la reponse est
+      lente : la cause la plus probable est applicative. Pour transformer la
+      probabilite en preuve : recapturer COTE SERVEUR ('netverdict capture'
+      sur le serveur) — si le delai y est identique, c'est l'app ; s'il
+      disparait, chercher entre les deux points de capture.
+
+  - id: rtt-degraded
+    verdict: RESEAU
+    priority: 70
+    confidence: moyenne
+    title: "Latence instable : gigue forte (congestion probable)"
+    when:
+      all:
+        # Dispersion INTERNE a la capture : pas besoin de baseline externe.
+        # p95 >= 8x le minimum = le chemin varie enormement ; plancher 50 ms
+        # pour ignorer la micro-variation d'un LAN (0.2 -> 1.6 ms est sain).
+        - "rtt_ms_p95 >= 50"
+        - "rtt_ms_min > 0"
+        - "rtt_ratio_p95_min >= 8"
+    evidence:
+      - "RTT min {rtt_ms_min:.1f} ms mais p95 {rtt_ms_p95:.1f} ms (x{rtt_ratio_p95_min:.0f}) sur {pkts_total} paquets"
+    remediation: |
+      Le chemin existe et fonctionne, mais sa latence explose par moments :
+      files d'attente qui se remplissent (congestion, bufferbloat), lien
+      partage sature par un autre trafic, ou equipement en limite CPU.
+      Croiser l'horaire des pics avec les graphes d'utilisation des liens.
+
+  - id: rst-midstream
+    verdict: AMBIGU
+    priority: 65
+    confidence: moyenne
+    title: "Session coupee net (RST) en plein travail"
+    when:
+      all:
+        - "rst_midstream == true"
+    evidence:
+      - "RST emis par {rst_emitter} apres echanges etablis ({bytes_c2s}o c2s / {bytes_s2c}o s2c, duree {duration_s:.1f}s)"
+    remediation: |
+      Une session qui travaillait a ete tuee. Trois familles de causes :
+      1. Timeout d'inactivite d'un equipement a etats (firewall, NAT, LB) :
+         typique si la coupure survient apres une periode calme — comparer
+         la duree d'idle avec les timeouts configures
+      2. IPS/inspection qui a decide de couper (verifier ses logs a ce
+         timestamp exact)
+      3. Crash ou restart du process en face (logs systeme/app du cote qui
+         a emis le RST).
+      Le cote emetteur du RST ({rst_emitter}) dit ou commencer.
+
+  - id: clean
+    verdict: RAS
+    priority: 10
+    confidence: haute
+    title: "Transport sain : le probleme n'est pas dans cette conversation reseau"
+    when:
+      all:
+        - "handshake_complete == true"
+        - "retrans_rate < 0.01"
+        - "zw_from_client == 0"
+        - "zw_from_server == 0"
+        - "rst_midstream == false"
+        - any:
+            - "exchanges == 0"
+            - "ttfb_ms_p95 < 500"
+    evidence:
+      - "Handshake {handshake_rtt_ms:.1f} ms, {pkts_total} pqts, pertes {retrans_rate:.2%}, TTFB p95 {ttfb_ms_p95:.0f} ms"
+    remediation: |
+      Rien d'anormal au niveau transport sur ce flux. Si l'utilisateur se
+      plaint quand meme : le probleme est au-dessus de TCP (erreurs HTTP
+      applicatives, contenu, authentification) ou sur un AUTRE flux que
+      celui-ci (dependance cachee : DNS, proxy, service tiers) — verifier
+      les autres conversations de la capture.

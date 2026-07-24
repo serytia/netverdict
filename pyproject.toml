@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "netverdict"
+version = "0.1.0"
+description = "Triage d'incident reseau/app/OS : analyse une capture et rend un verdict argumente avec preuves"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "GPL-2.0-only" }
+dependencies = [
+    # dpkt et non pyshark/tshark : parseur 100 % Python -> aucune dependance
+    # systeme (Wireshark absent de la plupart des serveurs qu'on analyse).
+    # On reimplemente le petit sous-ensemble d'analyse TCP dont on a besoin,
+    # c'est le coeur de la valeur de l'outil, pas un cout accidentel.
+    "dpkt>=1.9.8",
+    "rich>=13.0",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+# La couche --explain (API Claude) est un extra : l'outil complet fonctionne
+# sans, et un poste d'admin sans cle API n'a pas a tirer le SDK.
+explain = ["anthropic>=0.60"]
+
+[project.scripts]
+netverdict = "netverdict.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["netverdict*"]
+
+[tool.setuptools.package-data]
+netverdict = ["rules/*.yaml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

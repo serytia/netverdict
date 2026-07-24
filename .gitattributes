@@ -1,0 +1,7 @@
+# Scripts et data executes sous Linux : LF impose (un CRLF dans un .sh
+# copie vers la VM casse le shebang).
+*.sh   text eol=lf
+*.yaml text eol=lf
+*.py   text eol=lf
+*.ps1  text eol=crlf
+*.pcap binary
