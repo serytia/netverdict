@@ -74,6 +74,13 @@ netverdict analyze capture.pcapng --syslog fw01.log    --syslog-tz +02:00
 # Le rapport ajoute les changements des 15 min precedant la capture
 # (service installe, regle firewall rechargee, passage sur batterie...)
 # et marque ceux qui precedent l'incident de peu.
+#
+# v1.2 : les changements pertinents sont AUSSI rattaches au flux concerne,
+# directement dans son panneau de verdict, sous « A verifier en premier ».
+# Un `*` signale un type de changement pouvant produire ce verdict precis
+# (regle firewall -> RESEAU, crash de service -> APP, batterie -> OS).
+# C'est un CLASSEMENT de suspects, jamais une conclusion de causalite : les
+# changements sans affinite restent affiches, plus bas.
 
 # Capture assistee : trafic + etat hote en un coup (console admin/root)
 netverdict capture --duration 60                  # Windows: pktmon (natif) / Linux: tcpdump
@@ -142,8 +149,10 @@ Ajouter ses propres regles : `netverdict analyze ... --rules mes_regles.yaml`
 
 - v1.1 (fait) : timeline multi-sources — events Windows (EVTX/XML) + syslog
   pour repondre a "qu'est-ce qui a change dans l'infra juste avant ?".
-- v1.2 : `--syslog-tz` (fait), table Sysmon (EventID 3 : jointure
-  process<->connexion retroactive), correlation fine changement->verdict.
+- v1.2 : `--syslog-tz` (fait), correlation changement->verdict (fait), table
+  Sysmon (EventID 3 : jointure process<->connexion retroactive) — Sysmon est
+  livre avec Windows 11 24H2 (`C:\Windows\System32\sysmon.exe`), config prete
+  dans `capture/sysmon-netverdict.xml`, reste `sysmon -i` en admin.
 - v2 : capture pilotee des deux cotes (client ET serveur) et comparaison.
 
 ## Licence

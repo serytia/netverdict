@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Configuration Sysmon MINIMALE pour netverdict.
+
+  But : ne journaliser QUE l'evenement 3 (NetworkConnect), qui porte la
+  jointure process <-> connexion dont l'analyse a besoin :
+      SourceIp / SourcePort / DestinationIp / DestinationPort
+      + ProcessId + Image + Protocol + Initiated
+
+  C'est tout l'interet de Sysmon face a l'audit natif WFP (evenements
+  Securite 5156/5157) : le WFP journalise CHAQUE connexion autorisee dans le
+  journal Securite et le fait tourner en quelques heures sur un poste actif —
+  au moment ou l'on analyse un incident, les evenements utiles ont deja
+  disparu. Ici on cible, et le journal Sysmon est un canal separe, dimensionne
+  independamment.
+
+  IDIOME UTILISE, a ne pas "corriger" :
+    onmatch="include" SANS aucune regle  =  ne matche jamais  =  type d'evenement
+    eteint. C'est la facon documentee de desactiver un type d'evenement, plus
+    fiable que de compter sur ses valeurs par defaut (qui varient d'une version
+    a l'autre). Les 21 autres types sont donc explicitement eteints ci-dessous.
+
+    onmatch="exclude" SANS aucune regle  =  n'exclut rien  =  tout journalise.
+    C'est ce qu'on veut pour NetworkConnect : filtrer par port ou par process
+    risquerait d'ecarter precisement le flux de l'incident.
+
+  Verifie le 2026-07-25 contre le schema du binaire livre avec Windows
+  (C:\Windows\System32\sysmon.exe -s) : schemaversion 4.91, et les 22 noms
+  d'elements ci-dessous sont ceux que ce binaire declare. Un nom inconnu fait
+  rejeter TOUT le fichier.
+
+  Installation (terminal ADMINISTRATEUR) :
+      sysmon -accepteula -i capture\sysmon-netverdict.xml
+  Mise a jour d'une instance deja installee :
+      sysmon -c capture\sysmon-netverdict.xml
+  Desinstallation complete (driver + service + canal) :
+      sysmon -u force
+
+  Volume : sur un poste de bureau, compter quelques centaines a quelques
+  milliers d'evenements par heure. Verifier la taille du canal apres une
+  journee, et le reduire si besoin :
+      wevtutil sl Microsoft-Windows-Sysmon/Operational /ms:67108864
+-->
+<Sysmon schemaversion="4.91">
+  <!-- Aucun hachage calcule : on ne veut que la jointure reseau, et le hachage
+       coute du CPU a chaque process demarre pour rien ici. -->
+  <HashAlgorithms>*</HashAlgorithms>
+  <CheckRevocation>false</CheckRevocation>
+
+  <EventFiltering>
+    <!-- ============ LE SEUL EVENEMENT QUI NOUS INTERESSE ============ -->
+    <!-- exclude sans regle : tout est journalise. -->
+    <NetworkConnect onmatch="exclude" />
+
+    <!-- ============ TOUT LE RESTE ETEINT ============ -->
+    <!-- include sans regle : ne matche jamais, donc rien n'est journalise. -->
+    <ClipboardChange onmatch="include" />
+    <CreateRemoteThread onmatch="include" />
+    <DnsQuery onmatch="include" />
+    <DriverLoad onmatch="include" />
+    <FileBlockExecutable onmatch="include" />
+    <FileBlockShredding onmatch="include" />
+    <FileCreate onmatch="include" />
+    <FileCreateStreamHash onmatch="include" />
+    <FileCreateTime onmatch="include" />
+    <FileDelete onmatch="include" />
+    <FileDeleteDetected onmatch="include" />
+    <FileExecutableDetected onmatch="include" />
+    <ImageLoad onmatch="include" />
+    <PipeEvent onmatch="include" />
+    <ProcessAccess onmatch="include" />
+    <ProcessCreate onmatch="include" />
+    <ProcessTampering onmatch="include" />
+    <ProcessTerminate onmatch="include" />
+    <RawAccessRead onmatch="include" />
+    <RegistryEvent onmatch="include" />
+    <WmiEvent onmatch="include" />
+  </EventFiltering>
+</Sysmon>

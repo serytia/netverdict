@@ -125,6 +125,12 @@ def render_console(cap: Capture, verdicts: list[FlowVerdict],
                    timeline: Optional[Timeline] = None) -> None:
     con = console or Console()
     st = cap.stats
+    # Suspects rattaches a chaque flux. Indexe par position dans `verdicts`,
+    # avant tout tri d'affichage — l'ordre d'affichage ne doit pas changer
+    # l'association flux <-> suspects.
+    from .correlate import correlate
+    suspects_par_flux = correlate(verdicts, timeline)
+    position_de = {id(fv): i for i, fv in enumerate(verdicts)}
 
     con.print()
     header = (f"{st.total} paquets lus — {st.tcp} TCP, {st.icmp} ICMP, "
@@ -171,6 +177,24 @@ def render_console(cap: Capture, verdicts: list[FlowVerdict],
         if not s.direction_confident:
             body.append("  * sens client/serveur estime (pas de SYN dans la "
                         "capture) : lire les roles avec prudence\n", style="dim")
+        # Changements d'infra rattaches a CE flux. Place avant la piste de
+        # correction : c'est souvent la reponse la plus rapide, et c'est la
+        # que l'admin regarde. Vocabulaire du SOUPCON, jamais de la cause.
+        mes_suspects = suspects_par_flux.get(position_de.get(id(fv), -1), [])
+        if mes_suspects:
+            body.append("\nA verifier en premier (suspects, pas une cause "
+                        "etablie) :\n", style="bold")
+            for sp in mes_suspects:
+                e = sp.event
+                marque = "*" if sp.affinity else "-"
+                body.append(f"  {marque} {_fmt_ts(e.ts, e.tz_known)} "
+                            f"[{e.category}] {e.host} — {e.message} "
+                            f"({sp.describe()})\n",
+                            style="yellow" if sp.affinity else "")
+            if any(sp.affinity for sp in mes_suspects):
+                body.append("    * = type de changement pouvant produire ce "
+                            "verdict\n", style="dim")
+
         if m.remediation:
             body.append("\nPiste de correction :\n", style="bold")
             for line in m.remediation.splitlines():
@@ -218,6 +242,8 @@ def to_json(cap: Capture, verdicts: list[FlowVerdict],
             snapshot: Optional[HostSnapshot] = None,
             timeline: Optional[Timeline] = None) -> str:
     st = cap.stats
+    from .correlate import correlate
+    suspects_par_flux = correlate(verdicts, timeline)
     out = {
         "netverdict": 1,
         "stats": {"packets": st.total, "tcp": st.tcp, "icmp": st.icmp,
@@ -225,7 +251,7 @@ def to_json(cap: Capture, verdicts: list[FlowVerdict],
                   "linktype": st.linktype},
         "flows": [],
     }
-    for fv in verdicts:
+    for index, fv in enumerate(verdicts):
         s = fv.signals
         entry = {
             "flow": f"{s.client}:{s.cport}->{s.server}:{s.sport}",
@@ -249,6 +275,22 @@ def to_json(cap: Capture, verdicts: list[FlowVerdict],
                     "cpu_pct": ctx.cpu_pct, "disk_busy_pct": ctx.disk_busy_pct,
                     "process_cpu_pct": ctx.process_cpu_pct,
                 }
+        # Suspects rattaches a ce flux. `affinity` et `during_flow` sont
+        # exposes pour qu'un consommateur machine puisse ponderer lui-meme —
+        # et le nom du champ dit qu'il s'agit de suspects, pas de causes.
+        if suspects := suspects_par_flux.get(index):
+            entry["suspects"] = [{
+                "ts": sp.event.ts,
+                "delay_s": sp.delay_s,
+                "during_flow": sp.during_flow,
+                "affinity": sp.affinity,
+                "tz_known": sp.event.tz_known,
+                "source": sp.event.source,
+                "host": sp.event.host,
+                "category": sp.event.category,
+                "ident": sp.event.ident,
+                "message": sp.event.message,
+            } for sp in suspects]
         out["flows"].append(entry)
     if timeline is not None:
         out["timeline"] = {
