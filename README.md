@@ -61,6 +61,16 @@ netverdict analyze capture.pcapng --events events.xml --syslog fw01.log
 #   --events : events Windows (.evtx avec l'extra [evtx], ou export XML :
 #              wevtutil qe System /f:xml > events.xml)
 #   --syslog : fichiers syslog plats (RFC3164/RFC5424 melanges acceptes)
+
+# Fuseau des lignes RFC3164 (le format n'en porte AUCUN). A donner des que le
+# syslog ne vient pas d'une machine reglee comme le poste d'analyse : sinon les
+# evenements se decalent et sortent de la fenetre, en silence.
+netverdict analyze capture.pcapng --syslog central.log --syslog-tz UTC
+netverdict analyze capture.pcapng --syslog fw01.log    --syslog-tz Europe/Paris
+netverdict analyze capture.pcapng --syslog fw01.log    --syslog-tz +02:00
+#   UTC / nom IANA / decalage fixe. Le nom IANA gere l'heure d'ete (sur Windows,
+#   il demande `pip install tzdata` ; le decalage fixe marche partout).
+#   Sans effet sur les lignes RFC5424, qui portent deja leur fuseau.
 # Le rapport ajoute les changements des 15 min precedant la capture
 # (service installe, regle firewall rechargee, passage sur batterie...)
 # et marque ceux qui precedent l'incident de peu.
@@ -113,16 +123,27 @@ Ajouter ses propres regles : `netverdict analyze ... --rules mes_regles.yaml`
 - Sens client/serveur estime par heuristique si la capture demarre en pleine
   session (signale dans le rapport).
 - Le snapshot hote vient d'une seule machine (celle ou on a lance la capture).
-- Syslog RFC3164 (sans fuseau) : l'heure est interpretee dans le fuseau du
-  poste d'analyse. Une source en UTC analysee depuis un poste en heure
-  locale peut se decaler de la fenetre — les horodatages concernes sont
-  marques `~` dans le rapport. Une option --syslog-tz est au backlog.
+- Syslog RFC3164 (sans fuseau) : par defaut l'heure est interpretee dans le
+  fuseau du poste d'analyse, et les horodatages concernes sont marques `~`
+  dans le rapport. Une source en UTC lue depuis un poste en heure locale se
+  decale alors HORS de la fenetre, et le rapport affiche « aucun changement
+  detecte » — a lire comme « rien n'a ete retenu », pas comme « rien n'a
+  change ». **Corriger avec `--syslog-tz`** (voir Usage) : les horodatages
+  deviennent exacts, le `~` disparait et le delai avant l'incident est donne
+  a la seconde.
+- `--syslog-tz` avec un decalage FIXE (`+02:00`) est faux de part et d'autre
+  d'un changement d'heure : un fichier qui traverse le passage a l'heure
+  d'hiver sera mal date sur une moitie. Preferer un nom IANA
+  (`Europe/Paris`), qui gere l'heure d'ete. Sur une heure ambigue (celle qui
+  existe deux fois lors du retour a l'heure d'hiver), la premiere occurrence
+  est retenue.
 
 ## Roadmap
 
 - v1.1 (fait) : timeline multi-sources — events Windows (EVTX/XML) + syslog
   pour repondre a "qu'est-ce qui a change dans l'infra juste avant ?".
-- v1.2 : --syslog-tz, correlation fine changement->verdict.
+- v1.2 : `--syslog-tz` (fait), table Sysmon (EventID 3 : jointure
+  process<->connexion retroactive), correlation fine changement->verdict.
 - v2 : capture pilotee des deux cotes (client ET serveur) et comparaison.
 
 ## Licence

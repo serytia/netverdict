@@ -42,6 +42,23 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     if args.snapshot:
         snapshot = HostSnapshot.load(args.snapshot)
 
+    # Fuseau valide AVANT toute lecture : une faute de frappe doit se dire
+    # tout de suite, pas apres avoir parse trois fichiers.
+    syslog_tz = None
+    if args.syslog_tz:
+        if not args.syslog:
+            # Sans --syslog, l'option ne s'applique a rien. Le silence ferait
+            # croire a un decalage corrige alors que rien n'a bouge.
+            print("--syslog-tz n'a d'effet qu'avec --syslog (aucun fichier "
+                  "syslog fourni)", file=sys.stderr)
+            return 2
+        from .sources.syslog import parse_tz
+        try:
+            syslog_tz = parse_tz(args.syslog_tz)
+        except ValueError as e:
+            print(f"--syslog-tz: {e}", file=sys.stderr)
+            return 2
+
     timeline = None
     if args.events or args.syslog:
         from .timeline import Timeline
@@ -71,7 +88,8 @@ def cmd_analyze(args: argparse.Namespace) -> int:
         for path in args.syslog:
             from .sources import syslog as syslog_src
             try:
-                evs, st = syslog_src.parse(path, now=syslog_anchor)
+                evs, st = syslog_src.parse(path, now=syslog_anchor,
+                                           tz=syslog_tz)
             except (ValueError, OSError) as e:
                 print(f"--syslog {path}: {e}", file=sys.stderr)
                 return 2
@@ -160,6 +178,13 @@ def main(argv: list[str] | None = None) -> int:
     pa.add_argument("--syslog", action="append", default=[],
                     help="Fichier syslog plat (cumulable) — alimente la "
                          "timeline des changements")
+    pa.add_argument("--syslog-tz", metavar="FUSEAU",
+                    help="Fuseau des lignes RFC3164 (sans fuseau dans le "
+                         "format) : UTC, un decalage fixe (+02:00) ou un nom "
+                         "IANA (Europe/Paris). Par defaut : fuseau du poste "
+                         "d'analyse, ce qui decale un syslog central en UTC "
+                         "hors de la fenetre de la capture. Sans effet sur "
+                         "les lignes RFC5424, qui portent leur propre fuseau")
     pa.add_argument("--rules", action="append", default=[],
                     help="Fichier YAML de regles additionnelles (cumulable)")
     pa.add_argument("--json", action="store_true", help="Sortie JSON complete")

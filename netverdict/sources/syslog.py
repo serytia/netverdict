@@ -16,7 +16,7 @@ de format se prend par ligne, jamais au niveau du fichier entier.
 from __future__ import annotations
 
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 from typing import Optional
 
@@ -65,6 +65,85 @@ _MONTHS = {m: i + 1 for i, m in enumerate(
 # janvier) - 26h de marge pour couvrir un decalage d'horloge/fuseau
 # raisonnable sans confondre "cette nuit" avec "il y a un an".
 _FUTURE_SLACK = timedelta(hours=26)
+
+
+# --------------------------------------------------------------------------
+# Fuseau explicite pour les lignes RFC3164 (--syslog-tz).
+#
+# Le RFC3164 n'a NI annee NI fuseau. Sans indication, on interprete dans le
+# fuseau du poste d'analyse : un syslog central en UTC relu depuis un poste
+# en heure locale se decale d'une a deux heures et SORT de la fenetre de la
+# capture. Le rapport affiche alors « aucun changement detecte », ce qui se
+# lit « rien n'a change » alors que la verite est « mal date ». Panne
+# silencieuse : c'est la raison d'etre de cette option.
+# --------------------------------------------------------------------------
+
+# +HH:MM, +HHMM, +HH et leurs equivalents negatifs.
+_OFFSET_RE = re.compile(r"^(?P<sign>[+-])(?P<h>\d{1,2})(?::?(?P<m>\d{2}))?$")
+
+
+def parse_tz(spec: str) -> tzinfo:
+    """Convertit une specification de fuseau en tzinfo.
+
+    Trois formes acceptees, de la plus portable a la plus juste :
+      - "UTC" / "Z"                : le cas des syslog centraux bien configures.
+      - "+02:00" / "-0500" / "+05" : decalage FIXE. Toujours disponible (stdlib
+        pure), mais faux de part et d'autre d'un changement d'heure : un fichier
+        qui traverse le passage a l'heure d'hiver sera mal date sur une moitie.
+      - "Europe/Paris"             : nom IANA, gere l'heure d'ete correctement.
+        Necessite une base de fuseaux : presente sur Linux/macOS, ABSENTE de
+        Windows ou il faut `pip install tzdata`.
+
+    Leve ValueError avec une consigne actionnable : cette valeur vient de la
+    ligne de commande, l'utilisateur doit pouvoir se corriger seul.
+    """
+    spec = (spec or "").strip()
+    if not spec:
+        raise ValueError("--syslog-tz vide")
+    if spec.upper() in {"UTC", "Z", "GMT"}:
+        return timezone.utc
+
+    m = _OFFSET_RE.match(spec)
+    if m:
+        hours = int(m.group("h"))
+        minutes = int(m.group("m") or 0)
+        if hours > 23 or minutes > 59:
+            raise ValueError(
+                f"decalage hors bornes: {spec!r} (attendu entre -23:59 et +23:59)")
+        delta = timedelta(hours=hours, minutes=minutes)
+        if m.group("sign") == "-":
+            delta = -delta
+        return timezone(delta)
+
+    # Nom IANA : import local, la stdlib zoneinfo n'est chargee que si besoin.
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+    try:
+        return ZoneInfo(spec)
+    except ZoneInfoNotFoundError as exc:
+        # Le meme echec a DEUX causes possibles : base de fuseaux absente, ou
+        # nom qui n'existe pas. Conseiller `pip install tzdata` pour une faute
+        # de frappe enverrait installer un paquet pour rien -> on tranche.
+        try:
+            from zoneinfo import available_timezones
+            base_disponible = len(available_timezones()) > 100
+        except Exception:
+            base_disponible = False
+
+        formes = ("Formes acceptees : 'UTC', un nom IANA (Europe/Paris), "
+                  "ou un decalage fixe (+02:00). Attention, un decalage fixe "
+                  "est faux de part et d'autre d'un changement d'heure.")
+        if base_disponible or "/" not in spec:
+            # Base presente, ou chaine qui ne ressemble pas a un nom IANA
+            # (les noms de zones contiennent quasi toujours un '/').
+            raise ValueError(f"fuseau inconnu: {spec!r}. {formes}") from exc
+        raise ValueError(
+            f"fuseau {spec!r} introuvable : la base de fuseaux IANA n'est pas "
+            "installee (cas de Windows, qui n'en fournit pas). Corriger avec "
+            f"'pip install tzdata'. {formes}"
+        ) from exc
+    except (ValueError, OSError) as exc:
+        # Nom syntaxiquement invalide (chemin absolu, caracteres interdits).
+        raise ValueError(f"fuseau invalide: {spec!r} ({exc})") from exc
 
 
 def _nil(value: str) -> str:
@@ -176,15 +255,22 @@ def _split_tag(rest: str) -> tuple[str, str]:
     return _nil(tag), message.strip()
 
 
-def _rfc3164_epoch(ts_raw: str, now: Optional[datetime] = None) -> Optional[float]:
+def _rfc3164_epoch(ts_raw: str, now: Optional[datetime] = None,
+                   tz: Optional[tzinfo] = None) -> Optional[float]:
     """Timestamp RFC3164 ("Mon dd HH:MM:SS", pas d'annee ni de fuseau) ->
     epoch UTC.
 
-    Annee absente : on suppose l'annee courante de la machine d'analyse,
-    sauf si le resultat tombe a plus de _FUTURE_SLACK dans le futur (log
-    de decembre relu en janvier) -> annee precedente. L'heure est
-    interpretee dans le fuseau LOCAL de la machine d'analyse (c'est la
-    seule info disponible) ; l'appelant pose tz_known=False en consequence.
+    Annee absente : on suppose l'annee courante, sauf si le resultat tombe a
+    plus de _FUTURE_SLACK dans le futur (log de decembre relu en janvier) ->
+    annee precedente.
+
+    Fuseau : `tz` s'il est fourni (--syslog-tz), sinon le fuseau LOCAL de la
+    machine d'analyse — seule info disponible, et l'appelant pose alors
+    tz_known=False.
+
+    Le raisonnement se fait en EPOCH, jamais en soustrayant des datetime :
+    melanger un datetime naif et un datetime avec fuseau leve TypeError, et
+    ce code recoit les deux (`now` vient soit des tests, soit de cli.py).
 
     `now` est injectable (tests) ; par defaut l'horloge reelle.
     """
@@ -195,21 +281,36 @@ def _rfc3164_epoch(ts_raw: str, now: Optional[datetime] = None) -> Optional[floa
     month = _MONTHS.get(mon_s.lower())
     if month is None:
         return None
-    now = now or datetime.now()
     try:
         day, hour, minute, second = int(day_s), int(h_s), int(mi_s), int(s_s)
-        dt = datetime(now.year, month, day, hour, minute, second)
     except ValueError:
         return None
-    if dt - now > _FUTURE_SLACK:
+
+    now = now or datetime.now()
+    # .timestamp() interprete un naif comme de l'heure locale et respecte le
+    # fuseau d'un aware : les deux cas donnent le bon instant absolu.
+    now_epoch = now.timestamp()
+    # L'annee de reference se lit DANS le fuseau cible : a cheval sur le
+    # nouvel an, poste et source ne sont pas forcement la meme annee.
+    try:
+        reference_year = datetime.fromtimestamp(now_epoch, tz).year
+    except (OSError, OverflowError, ValueError):
+        reference_year = now.year
+
+    slack_s = _FUTURE_SLACK.total_seconds()
+    for year in (reference_year, reference_year - 1):
         try:
-            dt = datetime(now.year - 1, month, day, hour, minute, second)
-        except ValueError:
-            return None
-    # Naive + heure locale : datetime.timestamp() traite un datetime naif
-    # comme de l'heure LOCALE de la machine et le convertit en epoch UTC -
-    # exactement la semantique voulue ici (pas d'astimezone() a la main).
-    return dt.timestamp()
+            # tzinfo=None -> naif -> .timestamp() applique le fuseau local.
+            # tzinfo=ZoneInfo -> l'heure d'ete est resolue par la base IANA.
+            # Heure ambigue (retour a l'heure d'hiver) : Python retient la
+            # premiere occurrence (fold=0), choix documente au README.
+            dt = datetime(year, month, day, hour, minute, second, tzinfo=tz)
+            epoch = dt.timestamp()
+        except (ValueError, OSError, OverflowError):
+            continue
+        if epoch - now_epoch <= slack_s:
+            return epoch
+    return None
 
 
 def _parse_rfc5424(line: str) -> Optional[TimelineEvent]:
@@ -239,7 +340,8 @@ def _parse_rfc5424(line: str) -> Optional[TimelineEvent]:
                          tz_known=True)
 
 
-def _parse_rfc3164(line: str, now: Optional[datetime] = None) -> Optional[TimelineEvent]:
+def _parse_rfc3164(line: str, now: Optional[datetime] = None,
+                   tz: Optional[tzinfo] = None) -> Optional[TimelineEvent]:
     m = _RFC3164_PRI_RE.match(line)
     if not m:
         return None
@@ -248,23 +350,26 @@ def _parse_rfc3164(line: str, now: Optional[datetime] = None) -> Optional[Timeli
         pri = int(pri_s)
     except ValueError:
         return None
-    ts = _rfc3164_epoch(ts_raw, now)
+    ts = _rfc3164_epoch(ts_raw, now, tz)
     if ts is None:
         return None
     ident, message = _split_tag(rest)
     severity = _severity_from_pri(pri)
     category = _categorize(ident, message, severity)
+    # tz fourni = l'heure n'est plus une supposition : le rapport peut afficher
+    # un delta a la seconde au lieu d'un « environ N min » prudent.
     return TimelineEvent(ts=ts, source="syslog", host=_nil(host), category=category,
                          severity=severity, ident=ident, message=message,
-                         tz_known=False)
+                         tz_known=tz is not None)
 
 
-def _parse_rfc3164_nopri(line: str, now: Optional[datetime] = None) -> Optional[TimelineEvent]:
+def _parse_rfc3164_nopri(line: str, now: Optional[datetime] = None,
+                         tz: Optional[tzinfo] = None) -> Optional[TimelineEvent]:
     m = _RFC3164_NOPRI_RE.match(line)
     if not m:
         return None
     ts_raw, host, rest = m.groups()
-    ts = _rfc3164_epoch(ts_raw, now)
+    ts = _rfc3164_epoch(ts_raw, now, tz)
     if ts is None:
         return None
     ident, message = _split_tag(rest)
@@ -272,11 +377,12 @@ def _parse_rfc3164_nopri(line: str, now: Optional[datetime] = None) -> Optional[
     category = _categorize(ident, message, severity)
     return TimelineEvent(ts=ts, source="syslog", host=_nil(host), category=category,
                          severity=severity, ident=ident, message=message,
-                         tz_known=False)
+                         tz_known=tz is not None)
 
 
 def parse(path: str | Path,
-          now: Optional[datetime] = None) -> tuple[list[TimelineEvent], SourceStats]:
+          now: Optional[datetime] = None,
+          tz: Optional[tzinfo] = None) -> tuple[list[TimelineEvent], SourceStats]:
     """Lit un fichier syslog plat (formats melanges, ligne par ligne).
 
     Chaque ligne est essayee dans l'ordre a) RFC5424, b) RFC3164 avec PRI,
@@ -290,6 +396,11 @@ def parse(path: str | Path,
     fin du pcap) — sinon un log de fevrier relu en juillet prendrait
     l'annee en cours et sortirait de la fenetre en silence. Ce n'est pas
     un filtre temporel (le contrat l'interdit), juste l'ancre du calendrier.
+
+    `tz` (--syslog-tz) est le fuseau des lignes RFC3164 UNIQUEMENT. Les
+    lignes RFC5424 portent leur propre decalage, obligatoire dans le format :
+    il n'est jamais ecrase, sinon on remplacerait une information certaine
+    par une supposition de l'utilisateur.
 
     Ne leve que si le fichier lui-meme est illisible (chemin absent,
     permission refusee...) : ValueError avec message actionnable, pour que
@@ -310,11 +421,12 @@ def parse(path: str | Path,
 
     for line in text.splitlines():
         stats.total_lines += 1
+        # RFC5424 d'abord : son fuseau explicite prime sur --syslog-tz.
         ev = _parse_rfc5424(line)
         if ev is None:
-            ev = _parse_rfc3164(line, now)
+            ev = _parse_rfc3164(line, now, tz)
         if ev is None:
-            ev = _parse_rfc3164_nopri(line, now)
+            ev = _parse_rfc3164_nopri(line, now, tz)
         if ev is None:
             stats.unparsed += 1
             continue
