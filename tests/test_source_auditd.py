@@ -127,8 +127,11 @@ class TestParseFixture:
         events, stats = _parsed()
         assert stats.total_lines == 26
         assert stats.unparsed == 3        # ligne vide + 2 lignes poubelle
-        assert len(events) == 3
-        assert stats.parsed == 3
+        # 4 et non 3 : le connect() en success=no (serial 12349, nc) compte
+        # desormais comme une connexion — voir
+        # test_success_no_produit_QUAND_MEME_une_connexion pour le pourquoi.
+        assert len(events) == 4
+        assert stats.parsed == 4          # meme raison
 
     def test_trie_par_ts_croissant_malgre_l_ordre_du_fichier(self):
         """Le fichier place le serial 12346 (ts .202) avant 12347 (.777) avant
@@ -137,7 +140,9 @@ class TestParseFixture:
         events, _ = _parsed()
         tss = [e.ts for e in events]
         assert tss == sorted(tss)
-        assert tss == [1785018155.501, 1785018160.202, 1785018170.777]
+        # 1785018190.3 = le connect() success=no, desormais retenu.
+        assert tss == [1785018155.501, 1785018160.202, 1785018170.777,
+                       1785018190.3]
 
     def test_connexion_ipv4_curl(self):
         events, _ = _parsed()
@@ -184,11 +189,20 @@ class TestParseFixture:
         assert all(e.connection is None or e.connection.pid != 11903
                    for e in events)
 
-    def test_success_no_ne_produit_pas_de_connexion(self):
-        """serial 12349 (nc) : SYSCALL en echec (success=no) malgre un
-        SOCKADDR valide associe -> pas de connexion etablie."""
+    def test_success_no_produit_QUAND_MEME_une_connexion(self):
+        """serial 12349 (nc) : SYSCALL avec success=no.
+
+        INVERSION VOLONTAIRE du test d'origine, sur constat kernel (26/07).
+        Un `success=no` ne signifie PAS « pas de connexion » :
+          - les sockets NON BLOQUANTES (curl, navigateurs, clients async)
+            journalisent systematiquement `success=no exit=-115` (EINPROGRESS)
+            alors que la connexion s'etablit normalement ensuite ;
+          - un echec reel (ECONNREFUSED, ETIMEDOUT) laisse un flux dans le
+            pcap, et c'est justement le cas ou l'admin veut savoir QUI a tente.
+        Sur le journal reel du lab, filtrer sur success=yes rejetait 100 % des
+        connexions de curl."""
         events, _ = _parsed()
-        assert all(e.connection is None or e.connection.pid != 11904
+        assert any(e.connection is not None and e.connection.pid == 11904
                    for e in events)
 
     def test_syscall_sans_sockaddr_ne_crashe_pas(self):

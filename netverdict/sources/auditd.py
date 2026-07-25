@@ -142,8 +142,26 @@ def _decode_saddr(saddr_hex: str) -> tuple[str, int]:
     unparsed cote appelant) ; leve _NotIpFamily si la famille decodee n'est
     ni AF_INET ni AF_INET6 (record valide, hors sujet -- PAS unparsed).
     """
-    if not saddr_hex or len(saddr_hex) % 2 or not _HEX_RE.match(saddr_hex):
-        raise ValueError(f"saddr non hexadecimal ou de longueur impaire: {saddr_hex!r}")
+    # auditd ecrit par DEFAUT en `log_format=ENRICHED` sur Debian/RHEL
+    # modernes (confirme au lab : DAEMON_START ... format=enriched, auditd
+    # 4.0.2). Ce n'est donc pas un artefact d'ausearch : le fichier
+    # /var/log/audit/audit.log lui-meme colle la version interpretee du champ
+    # DIRECTEMENT derriere la valeur, sans separateur —
+    #   saddr=02001F907F0000010000000000000000SADDR={ saddr_fam=inet ... }
+    # Un decoupage sur l'espace ramene donc l'hex + "SADDR={", non
+    # hexadecimal, et TOUT record reel finissait en unparsed (constate au lab
+    # kernel le 26/07 : 78 unparsed sur 224, zero connexion retrouvee).
+    # On tronque au premier caractere non hexadecimal : robuste pour le
+    # format brut comme pour l'enrichi.
+    m = re.match(r'[0-9A-Fa-f]*', saddr_hex or "")
+    saddr_hex = m.group(0) if m else ""
+    # Longueur impaire = octet coupe en deux : on retire le demi-octet
+    # orphelin plutot que de jeter le record (les champs utiles — famille,
+    # port, adresse — sont en tete de la structure).
+    if len(saddr_hex) % 2:
+        saddr_hex = saddr_hex[:-1]
+    if not saddr_hex:
+        raise ValueError("saddr vide ou non hexadecimal")
     raw = bytes.fromhex(saddr_hex)
     if len(raw) < 4:
         raise ValueError("saddr trop court pour porter une famille+port")
@@ -251,8 +269,22 @@ def parse(path: str | Path) -> tuple[list[TimelineEvent], SourceStats]:
 
     events: list[TimelineEvent] = []
     for serial, (ts, fields) in syscalls.items():
-        if fields.get("success", "").strip().lower() != "yes":
-            continue  # echec du connect() : pas de connexion etablie/tentee valablement.
+        # ON NE FILTRE PAS SUR success. Deux raisons, les deux verifiees sur
+        # un journal reel (lab kernel, 26/07) :
+        #
+        # 1. Les clients modernes utilisent des sockets NON BLOQUANTES :
+        #    connect() rend la main immediatement avec EINPROGRESS, journalise
+        #    `success=no exit=-115`, et la connexion s'etablit ensuite tres
+        #    normalement. curl, les navigateurs et tout client async sont dans
+        #    ce cas — exiger success=yes rejetait 100 % de leurs connexions.
+        # 2. Un connect() qui echoue VRAIMENT (ECONNREFUSED, ETIMEDOUT) est
+        #    precisement ce que cet outil diagnostique : le flux existe dans
+        #    le pcap (SYN sans reponse, RST) et l'admin veut savoir QUI a
+        #    tente. Jeter ces records nous priverait des cas les plus utiles.
+        #
+        # Le garde-fou contre les faux positifs reste la famille d'adresse
+        # (AF_UNIX et consorts sont deja ecartes au decodage) et la jointure
+        # elle-meme, qui exige une correspondance de destination.
         dst = sockaddrs.get(serial)
         if dst is None:
             continue  # SYSCALL sans SOCKADDR correspondant : rien a joindre.
