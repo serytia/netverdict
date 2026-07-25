@@ -133,6 +133,108 @@ def suspects_for(fv: FlowVerdict, timeline: Timeline,
     return out[:limit]
 
 
+# ---------------------------------------------------------------------------
+# Jointure process <-> flux, retroactive (v1.2)
+#
+# Le snapshot d'hote (hostsnap.py) est pris a UN instant : il rate le process
+# deja mort quand la capture s'arrete. Une source d'evenements date chaque
+# connexion a son etablissement, donc elle retrouve le process meme disparu.
+# ---------------------------------------------------------------------------
+
+# Tolerance d'horloge entre la capture et le journal d'evenements. Sur une
+# meme machine (cas normal : capture + Sysmon cote a cote), l'ecart est nul ;
+# la marge couvre un pcap et des events venant de deux hotes.
+CLOCK_TOLERANCE_S = 60.0
+
+
+@dataclass
+class ProcessAttribution:
+    """Le process qui detenait la socket, retrouve a posteriori."""
+
+    event: TimelineEvent
+    # "client" ou "serveur" : de quel COTE du flux se trouve ce process. Savoir
+    # lequel des deux on a identifie change entierement la lecture du verdict.
+    side: str
+    # Nombre total d'evenements de connexion qui collaient a ce flux. > 1 =
+    # reutilisation de port sur une capture longue : on affiche le plus proche
+    # du debut du flux, mais l'admin doit savoir qu'il y avait ambiguite.
+    candidates: int = 1
+
+    @property
+    def connection(self):
+        return self.event.connection
+
+    def describe(self) -> str:
+        c = self.connection
+        assert c is not None                      # garanti par la construction
+        txt = f"{c.process_label()} cote {self.side}"
+        if c.user:
+            txt += f", utilisateur {c.user}"
+        if self.candidates > 1:
+            txt += (f" — {self.candidates} connexions correspondaient "
+                    f"(port reutilise ?), la plus proche du debut du flux")
+        return txt
+
+
+def _side_of(conn, sig) -> Optional[str]:
+    """De quel cote du flux se trouve le process de cet evenement ?
+
+    On teste les DEUX sens du quadruplet : l'evenement peut avoir ete emis par
+    la machine cliente (elle initie) ou par la machine serveur (elle recoit).
+    Une correspondance partielle ne compte pas — un port identique sur une
+    autre adresse est un autre flux.
+    """
+    if (conn.src_ip == sig.client and conn.src_port == sig.cport
+            and conn.dst_ip == sig.server and conn.dst_port == sig.sport):
+        return "client"
+    if (conn.src_ip == sig.server and conn.src_port == sig.sport
+            and conn.dst_ip == sig.client and conn.dst_port == sig.cport):
+        return "serveur"
+    return None
+
+
+def attribution_for(fv: FlowVerdict, timeline: Timeline,
+                    tolerance_s: float = CLOCK_TOLERANCE_S,
+                    ) -> Optional[ProcessAttribution]:
+    """Retrouve le process d'un flux via les evenements de connexion.
+
+    Contrairement aux suspects, cette jointure vaut AUSSI pour un flux sain :
+    savoir quel process parle est utile meme sans panne.
+    """
+    sig = fv.signals
+    t_end = sig.t_first + max(0.0, sig.duration_s)
+    trouves: list[tuple[float, TimelineEvent, str]] = []
+
+    for e in timeline.events:
+        c = e.connection
+        if c is None:
+            continue
+        # TCP seulement : le reste des flux n'est pas modelise par cet outil.
+        if c.protocol and c.protocol != "tcp":
+            continue
+        if not (sig.t_first - tolerance_s <= e.ts <= t_end + tolerance_s):
+            continue
+        side = _side_of(c, sig)
+        if side is None:
+            continue
+        trouves.append((abs(e.ts - sig.t_first), e, side))
+
+    if not trouves:
+        return None
+    trouves.sort(key=lambda t: t[0])
+    _ecart, event, side = trouves[0]
+    return ProcessAttribution(event=event, side=side, candidates=len(trouves))
+
+
+def attributions(verdicts: list[FlowVerdict],
+                 timeline: Optional[Timeline]) -> dict[int, ProcessAttribution]:
+    """Table {index du flux -> attribution}, meme convention que correlate()."""
+    if timeline is None:
+        return {}
+    return {i: a for i, fv in enumerate(verdicts)
+            if (a := attribution_for(fv, timeline))}
+
+
 def correlate(verdicts: list[FlowVerdict],
               timeline: Optional[Timeline]) -> dict[int, list[Suspect]]:
     """Table {index du flux dans `verdicts` -> suspects}.

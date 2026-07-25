@@ -128,8 +128,9 @@ def render_console(cap: Capture, verdicts: list[FlowVerdict],
     # Suspects rattaches a chaque flux. Indexe par position dans `verdicts`,
     # avant tout tri d'affichage — l'ordre d'affichage ne doit pas changer
     # l'association flux <-> suspects.
-    from .correlate import correlate
+    from .correlate import attributions, correlate
     suspects_par_flux = correlate(verdicts, timeline)
+    process_par_flux = attributions(verdicts, timeline)
     position_de = {id(fv): i for i, fv in enumerate(verdicts)}
 
     con.print()
@@ -174,6 +175,12 @@ def render_console(cap: Capture, verdicts: list[FlowVerdict],
             ctx = snapshot.context_for(s)
             if ctx and ctx.summary():
                 body.append(f"  * etat hote : {ctx.summary()}\n", style="cyan")
+        # Attribution RETROACTIVE : contrairement au snapshot, elle retrouve
+        # aussi un process deja mort a la fin de la capture.
+        attr = process_par_flux.get(position_de.get(id(fv), -1))
+        if attr:
+            body.append(f"  * process (journal, retroactif) : "
+                        f"{attr.describe()}\n", style="cyan")
         if not s.direction_confident:
             body.append("  * sens client/serveur estime (pas de SYN dans la "
                         "capture) : lire les roles avec prudence\n", style="dim")
@@ -242,8 +249,9 @@ def to_json(cap: Capture, verdicts: list[FlowVerdict],
             snapshot: Optional[HostSnapshot] = None,
             timeline: Optional[Timeline] = None) -> str:
     st = cap.stats
-    from .correlate import correlate
+    from .correlate import attributions, correlate
     suspects_par_flux = correlate(verdicts, timeline)
+    process_par_flux = attributions(verdicts, timeline)
     out = {
         "netverdict": 1,
         "stats": {"packets": st.total, "tcp": st.tcp, "icmp": st.icmp,
@@ -278,6 +286,20 @@ def to_json(cap: Capture, verdicts: list[FlowVerdict],
         # Suspects rattaches a ce flux. `affinity` et `during_flow` sont
         # exposes pour qu'un consommateur machine puisse ponderer lui-meme —
         # et le nom du champ dit qu'il s'agit de suspects, pas de causes.
+        if attr := process_par_flux.get(index):
+            c = attr.connection
+            entry["process_attribution"] = {
+                "source": attr.event.source,
+                "retroactive": True,
+                "side": attr.side,
+                "candidates": attr.candidates,
+                "pid": c.pid,
+                "image": c.image,
+                "user": c.user,
+                "protocol": c.protocol,
+                "initiated": c.initiated,
+                "ts": attr.event.ts,
+            }
         if suspects := suspects_par_flux.get(index):
             entry["suspects"] = [{
                 "ts": sp.event.ts,

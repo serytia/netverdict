@@ -48,7 +48,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from ..timeline import SourceStats, TimelineEvent
+from ..timeline import ConnectionInfo, SourceStats, TimelineEvent
+
+# Sysmon est livre AVEC Windows 11 24H2 (C:\Windows\System32\sysmon.exe,
+# ProductName "Sysmon Sysinternals", signe CN=Microsoft Windows) : aucun
+# telechargement, mais il faut `sysmon -i <config>` en administrateur pour
+# installer le driver, le service et le canal de journal.
+_SYSMON_PROVIDER = "Microsoft-Windows-Sysmon"
+# Event ID 3 = NetworkConnect. DESACTIVE par defaut : il faut une config
+# (voir capture/sysmon-netverdict.xml, qui n'active que celui-la).
+_SYSMON_NETWORK_CONNECT = "3"
 
 # Namespace XML de tous les evenements Windows modernes (journal "Crimson").
 _EVENT_NS = "http://schemas.microsoft.com/win/2004/08/events/event"
@@ -150,6 +159,14 @@ _EVENT_TABLE: dict[tuple[str, str], tuple[str, int, str]] = {
     # le suspect n 1 apres un service nouvellement installe.
     ("Microsoft-Windows-WindowsUpdateClient", "19"):
         ("change", 2, "mise a jour installee"),
+
+    # Sysmon : connexion reseau observee, avec le process qui la detient.
+    # Categorie "info" et severite 0 A DESSEIN : c'est une OBSERVATION, pas un
+    # changement d'infra. La mettre dans CHANGE_CATEGORIES noierait la section
+    # « changements » sous chaque connexion de la machine. Sa valeur est
+    # ailleurs : le champ `connection`, qui porte la jointure process<->flux.
+    (_SYSMON_PROVIDER, _SYSMON_NETWORK_CONNECT):
+        ("info", 0, "connexion reseau"),
 
     # Connexion a un profil reseau : l'hote vient de rejoindre un reseau
     # (cable branche, wifi associe, VPN monte).
@@ -290,6 +307,71 @@ def _simple_eventdata(ev: ET.Element, ns_prefix: str) -> str:
     return ", ".join(parts)
 
 
+def _eventdata_map(ev: ET.Element, ns_prefix: str) -> dict[str, str]:
+    """Tous les <Data Name="X">valeur</Data> de EventData, en dictionnaire.
+
+    Complementaire de _simple_eventdata (qui fabrique un resume humain court) :
+    ici on veut les champs EXACTS, sans troncature ni filtre de longueur.
+    """
+    parent = ev.find(f"{ns_prefix}EventData")
+    if parent is None:
+        return {}
+    out: dict[str, str] = {}
+    for d in parent.findall(f"{ns_prefix}Data"):
+        name = d.get("Name")
+        if name:
+            out[name] = (d.text or "").strip()
+    return out
+
+
+def _as_int(value: str) -> Optional[int]:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _sysmon_connection(fields: dict[str, str]) -> Optional[ConnectionInfo]:
+    """Event ID 3 (NetworkConnect) -> ConnectionInfo.
+
+    Noms de champs releves sur le SCHEMA du binaire livre avec Windows
+    (`sysmon.exe -s`, schemaversion 4.91) et non devines : SourceIp,
+    SourcePort, DestinationIp, DestinationPort, ProcessId, Image, User,
+    Protocol, Initiated.
+
+    Un quadruplet incomplet renvoie None : une jointure sur une adresse ou un
+    port manquant rattacherait le flux au mauvais process, ce qui est pire que
+    pas de jointure du tout.
+    """
+    src_ip = fields.get("SourceIp", "")
+    dst_ip = fields.get("DestinationIp", "")
+    src_port = _as_int(fields.get("SourcePort", ""))
+    dst_port = _as_int(fields.get("DestinationPort", ""))
+    if not src_ip or not dst_ip or src_port is None or dst_port is None:
+        return None
+
+    initiated_raw = fields.get("Initiated", "").strip().lower()
+    initiated: Optional[bool]
+    if initiated_raw in {"true", "1"}:
+        initiated = True
+    elif initiated_raw in {"false", "0"}:
+        initiated = False
+    else:
+        initiated = None
+
+    return ConnectionInfo(
+        src_ip=src_ip,
+        src_port=src_port,
+        dst_ip=dst_ip,
+        dst_port=dst_port,
+        protocol=fields.get("Protocol", "").strip().lower(),
+        pid=_as_int(fields.get("ProcessId", "")),
+        image=fields.get("Image", ""),
+        user=fields.get("User", ""),
+        initiated=initiated,
+    )
+
+
 def _parse_event_element(ev: ET.Element) -> Optional[TimelineEvent]:
     """Convertit UN element <Event> (namespace ou non) en TimelineEvent.
 
@@ -337,8 +419,21 @@ def _parse_event_element(ev: ET.Element) -> Optional[TimelineEvent]:
         category, severity = _LEVEL_DEFAULT.get(level, ("info", 0))
         desc = f"EventID {ident}" if ident else "evenement sans EventID"
 
-    extra = _simple_eventdata(ev, p)
-    resume = f"{desc} ({extra})" if extra else desc
+    # Sysmon Event 3 : on extrait la jointure process<->connexion, et on
+    # fabrique un resume lisible plutot que le "Name=valeur" generique.
+    connection: Optional[ConnectionInfo] = None
+    if provider == _SYSMON_PROVIDER and ident == _SYSMON_NETWORK_CONNECT:
+        connection = _sysmon_connection(_eventdata_map(ev, p))
+
+    if connection is not None:
+        c = connection
+        resume = (f"{desc} : {c.process_label()} "
+                  f"{c.src_ip}:{c.src_port} -> {c.dst_ip}:{c.dst_port}")
+        if c.protocol:
+            resume += f" ({c.protocol})"
+    else:
+        extra = _simple_eventdata(ev, p)
+        resume = f"{desc} ({extra})" if extra else desc
     message = f"{provider or '(provider inconnu)'}: {resume}"
 
     return TimelineEvent(
@@ -350,6 +445,7 @@ def _parse_event_element(ev: ET.Element) -> Optional[TimelineEvent]:
         ident=ident,
         message=message,
         tz_known=True,
+        connection=connection,
     )
 
 

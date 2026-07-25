@@ -130,6 +130,14 @@ Ajouter ses propres regles : `netverdict analyze ... --rules mes_regles.yaml`
 - Sens client/serveur estime par heuristique si la capture demarre en pleine
   session (signale dans le rapport).
 - Le snapshot hote vient d'une seule machine (celle ou on a lance la capture).
+  Il est pris a UN instant : il rate le process deja mort a la fin de la
+  capture. La jointure Sysmon (Event ID 3), elle, est retroactive et le
+  retrouve — voir « Jointure process » ci-dessous.
+- Jointure process <-> flux : correspondance sur le quadruplet EXACT (les deux
+  sens sont testes), TCP uniquement, avec 60 s de tolerance d'horloge entre la
+  capture et le journal. Un port client reutilise pendant la capture produit
+  plusieurs candidats : le plus proche du debut du flux est retenu, et le
+  rapport signale l'ambiguite plutot que de la taire.
 - Syslog RFC3164 (sans fuseau) : par defaut l'heure est interpretee dans le
   fuseau du poste d'analyse, et les horodatages concernes sont marques `~`
   dans le rapport. Une source en UTC lue depuis un poste en heure locale se
@@ -149,10 +157,11 @@ Ajouter ses propres regles : `netverdict analyze ... --rules mes_regles.yaml`
 
 - v1.1 (fait) : timeline multi-sources — events Windows (EVTX/XML) + syslog
   pour repondre a "qu'est-ce qui a change dans l'infra juste avant ?".
-- v1.2 : `--syslog-tz` (fait), correlation changement->verdict (fait), table
-  Sysmon (EventID 3 : jointure process<->connexion retroactive) — Sysmon est
-  livre avec Windows 11 24H2 (`C:\Windows\System32\sysmon.exe`), config prete
-  dans `capture/sysmon-netverdict.xml`, reste `sysmon -i` en admin.
+- v1.2 (fait) : `--syslog-tz`, correlation changement->verdict, jointure
+  process<->flux retroactive via Sysmon Event ID 3. **Reste a valider sur un
+  vrai enregistrement Sysmon** (`sysmon -i` demande une console admin) : les
+  noms de champs viennent du schema du binaire, la forme du XML est celle des
+  evenements Windows standards deja parses par sources/evtx.py.
 - v2 : capture pilotee des deux cotes (client ET serveur) et comparaison.
 
 ## Licence

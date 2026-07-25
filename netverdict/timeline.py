@@ -47,6 +47,55 @@ CHANGE_CATEGORIES = {"change", "power", "network", "service", "reboot"}
 
 
 @dataclass
+class ConnectionInfo:
+    """Jointure process <-> connexion, quand la source la porte (v1.2).
+
+    C'est ce qui manque au snapshot d'hote (hostsnap.py) : celui-ci est pris a
+    UN instant, donc il rate le process qui etait deja mort. Une source
+    d'evenements, elle, date chaque connexion a son etablissement — la
+    jointure devient RETROACTIVE.
+
+    Deux sources connues portent exactement ces champs, d'ou une structure
+    commune plutot qu'un format par source :
+      - Sysmon Event ID 3 (NetworkConnect) — livre avec Windows 11 24H2 ;
+      - audit natif WFP, evenements Securite 5156/5157 — zero installation,
+        mais tres verbeux.
+
+    `src`/`dst` sont ceux de l'evenement, pas du flux : la jointure teste les
+    DEUX sens (le process observe peut etre le client ou le serveur).
+    """
+
+    src_ip: str
+    src_port: int
+    dst_ip: str
+    dst_port: int
+    protocol: str = ""                 # "tcp" | "udp" (minuscule)
+    pid: Optional[int] = None
+    image: str = ""                    # chemin complet de l'executable
+    user: str = ""
+    # True = connexion sortante initiee par ce process. Renseigne par Sysmon
+    # (champ Initiated) ; None quand la source ne le dit pas.
+    initiated: Optional[bool] = None
+
+    def __post_init__(self):
+        # MEME neutralisation que TimelineEvent, et pour la meme raison : ces
+        # chaines viennent d'une source hostile potentielle (un nom de process
+        # ou d'utilisateur est controlable) et finissent affichees dans un
+        # terminal. Nettoyer ICI plutot que dans TimelineEvent garantit la
+        # protection quel que soit le chemin de construction.
+        self.image = _clean(self.image)
+        self.user = _clean(self.user)
+        self.protocol = _clean(self.protocol)
+        self.src_ip = _clean(self.src_ip)
+        self.dst_ip = _clean(self.dst_ip)
+
+    def process_label(self) -> str:
+        """Nom court + pid, pour le rapport ("chrome.exe (pid 4212)")."""
+        nom = self.image.replace("\\", "/").rsplit("/", 1)[-1] or self.image
+        return f"{nom} (pid {self.pid})" if self.pid else (nom or "?")
+
+
+@dataclass
 class TimelineEvent:
     """Un evenement normalise, quelle que soit sa source.
 
@@ -62,6 +111,12 @@ class TimelineEvent:
     message   : resume humain UNE ligne, deja nettoye par le parseur.
     tz_known  : False si le timestamp a ete interprete sans fuseau fiable
                 (syslog RFC3164...) — le rapport l'affiche avec prudence.
+    connection: renseigne UNIQUEMENT par les sources qui datent une connexion
+                (Sysmon Event 3, WFP 5156/5157). Sert a la jointure
+                process<->flux, pas a la section « changements » : un
+                evenement de connexion est une OBSERVATION, pas un changement
+                d'infra — sa categorie doit rester hors de CHANGE_CATEGORIES,
+                sinon chaque connexion polluerait la liste des suspects.
     """
 
     ts: float
@@ -72,6 +127,7 @@ class TimelineEvent:
     ident: str
     message: str
     tz_known: bool = True
+    connection: Optional[ConnectionInfo] = None
 
     def __post_init__(self):
         if self.category not in CATEGORIES:
