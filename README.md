@@ -73,9 +73,22 @@ netverdict analyze capture.pcapng --events events.xml --syslog fw01.log
 netverdict analyze capture.pcapng --syslog central.log --syslog-tz UTC
 netverdict analyze capture.pcapng --syslog fw01.log    --syslog-tz Europe/Paris
 netverdict analyze capture.pcapng --syslog fw01.log    --syslog-tz +02:00
-#   UTC / nom IANA / decalage fixe. Le nom IANA gere l'heure d'ete (sur Windows,
-#   il demande `pip install tzdata` ; le decalage fixe marche partout).
+#   UTC / nom IANA / decalage fixe. Le nom IANA gere l'heure d'ete.
 #   Sans effet sur les lignes RFC5424, qui portent deja leur fuseau.
+
+# Qui detenait la socket ? La reponse MEME SI le process est deja mort.
+netverdict analyze capture.pcap --audit /var/log/audit/audit.log   # Linux
+netverdict analyze capture.pcapng --events sysmon.xml              # Windows
+#   Le snapshot d'etat hote est pris a UN instant : il rate le process qui
+#   s'est termine avant la fin de la capture. Un journal, lui, date chaque
+#   connexion a son etablissement — l'attribution devient retroactive.
+#   Linux  : regle a charger (une fois) —
+#            auditctl -a always,exit -F arch=b64 -S connect -k netverdict_connect
+#            (persistant : un fichier dans /etc/audit/rules.d/)
+#   Windows: Sysmon avec NetworkConnect actif —
+#            sysmon -c netverdict/capture/sysmon-netverdict.xml
+#   Si la source est presente mais la regle absente, l'outil le DIT au lieu
+#   de rendre un rapport muet.
 # Le rapport ajoute les changements des 15 min precedant la capture
 # (service installe, regle firewall rechargee, passage sur batterie...)
 # et marque ceux qui precedent l'incident de peu.
@@ -135,16 +148,38 @@ Deux etages strictement separes, comme decodeurs/regles dans Wazuh :
 Ajouter ses propres regles : `netverdict analyze ... --rules mes_regles.yaml`
 (meme format que `netverdict/rules/builtin.yaml`).
 
+## Plateformes
+
+| | Analyse (`analyze`) | Capture assistee | Jointure process <-> flux |
+|---|---|---|---|
+| Linux | oui | `capture.sh` (tcpdump + ss) | `--audit` (auditd) |
+| Windows | oui | `capture.ps1` (pktmon, natif) | `--events` (Sysmon EID 3) |
+| macOS | oui | non — capturer avec `tcpdump`, puis analyser | non |
+
+CI : Linux/Windows/macOS x Python 3.11-3.13, plus un job en fuseau decale,
+un avec les extras installes, un sur le paquet construit.
+
 ## Statut de validation
 
-- **Valide** : 18 tests automatises — 9 scenarios de panne de bout en bout
-  (pcaps synthetiques) + cas de bord (wraparound de sequence, doublons de
-  capture, keepalives, capture demarree en pleine session, troncature
-  en-tetes seuls).
-- **En cours** : validation terrain sur pcaps generes par un vrai kernel
-  Linux (lab VM : netem, iptables, vraies sockets — voir `lab/`).
-- **Pas encore fait** : incidents reels de production. Les verdicts sont un
-  point de depart outille, pas un oracle — le AMBIGU est un verdict assume.
+- **Valide** : 239 tests automatises, verts sur Linux, Windows et macOS
+  (Python 3.11 a 3.13) et sous fuseau decale.
+- **Valide au kernel** : 8 scenarios de panne reproduits par un vrai noyau
+  Linux (netem, iptables, vraies sockets — `lab/`), plus la jointure auditd
+  sur un journal auditd reel. Les pcaps produits servent de fixtures.
+- **Valide sur incident reel** : chaine de capture Windows complete (pktmon
+  -> analyse) contre un service lent, un port ferme et un port filtre — les
+  trois verdicts exacts.
+- **Pas encore fait** : incidents de production subis (non provoques). Les
+  verdicts sont un point de depart outille, pas un oracle — AMBIGU est un
+  verdict assume, et le rapport dit ce qu'il n'a pas su lire.
+
+Ce que ces validations ont coute, et pourquoi elles figurent ici : chacune a
+trouve des defauts que les tests sur donnees fabriquees ne voyaient pas —
+detection de retransmissions cassee par TSO/GSO, `pktmon` qui annonce un
+type de trame et en ecrit un autre, `auditd` dont le format par defaut n'est
+pas celui de sa documentation, et des pannes Windows declenchees par des
+donnees Linux. Les fixtures ecrites a la main decrivent l'outil qu'on
+imagine ; l'execution reelle decrit celui qui existe.
 
 ## Limites connues (v1)
 
