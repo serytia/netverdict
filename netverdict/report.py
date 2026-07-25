@@ -116,6 +116,10 @@ def render_timeline(tl: Timeline, incident_ts: Optional[float],
         if st.unparsed:
             note += f", {st.unparsed} illisibles"
         con.print(Text(f"  {name}: {note}", style="dim"))
+        if st.note:
+            # Avertissement actionnable du parseur : en evidence, pas en dim —
+            # c'est la difference entre une capacite inerte et une absente.
+            con.print(Text(f"  {name}: {st.note}", style="bold yellow"))
     con.print()
 
 
@@ -331,7 +335,7 @@ def to_json(cap: Capture, verdicts: list[FlowVerdict],
                 "tz_known": e.tz_known,
             } for e in timeline.events],
             "stats": {k: {"total_lines": v.total_lines, "parsed": v.parsed,
-                          "unparsed": v.unparsed}
+                          "unparsed": v.unparsed, "note": v.note}
                       for k, v in timeline.stats.items()},
         }
     return json.dumps(out, indent=2, ensure_ascii=False)

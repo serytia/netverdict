@@ -146,6 +146,11 @@ class SourceStats:
     total_lines: int = 0          # lignes/records rencontres
     parsed: int = 0               # convertis en TimelineEvent
     unparsed: int = 0             # illisibles (comptes, jamais fatals)
+    # Avertissement actionnable du parseur (ex : « Sysmon sans NetworkConnect,
+    # la jointure process<->flux ne peut pas fonctionner — activer via ... »).
+    # Le rapport l'affiche en evidence : une capacite silencieusement inerte
+    # est pire qu'une capacite absente.
+    note: str = ""
 
 
 # ---------------------------------------------------------------------------

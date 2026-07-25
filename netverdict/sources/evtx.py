@@ -542,5 +542,20 @@ def parse(path: str | Path) -> tuple[list[TimelineEvent], SourceStats]:
     else:
         events = _parse_xml_file(path, stats)
 
+    # Garde-fou constate sur machine reelle : `sysmon -i` SANS config
+    # n'active pas NetworkConnect (EID3). Les events Sysmon se parsent alors
+    # tres bien (ProcessCreate...), la jointure process<->flux ne matche
+    # jamais, et RIEN ne le dit — une capacite silencieusement inerte. Le
+    # critere est semantique (aucun event ne porte de ConnectionInfo), pas
+    # le numero 3 : il couvrira les variantes futures (WFP 5156). Le prefixe
+    # du message est NOTRE format (f"{provider}: ..."), invariant teste.
+    if events and not any(e.connection is not None for e in events):
+        if any(e.message.startswith(_SYSMON_PROVIDER) for e in events):
+            stats.note = (
+                "events Sysmon lus mais AUCUN NetworkConnect (EID3) : "
+                "l'attribution process<->flux ne peut pas fonctionner. "
+                "Activer : sysmon -c <chemin>\\netverdict\\capture\\"
+                "sysmon-netverdict.xml (console administrateur)")
+
     events.sort(key=lambda e: e.ts)
     return events, stats
