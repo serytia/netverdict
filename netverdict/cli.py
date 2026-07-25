@@ -79,7 +79,12 @@ def cmd_analyze(args: argparse.Namespace) -> int:
         # un bundle archive (log de fevrier analyse en juillet) resterait
         # sinon date de l'annee courante et sortirait de la fenetre.
         syslog_anchor = None
-        if cap.t_last:
+        # `is not None` et non la veracite : l'epoch 0 est une VALEUR (pcap
+        # synthetique ou anonymise), pas une absence. Un `if cap.t_last:`
+        # retombait alors sur l'horloge du POSTE pour dater les lignes RFC3164,
+        # sans le moindre signal — meme panne muette que celle corrigee dans
+        # correlate.py, et elle deplace les evenements de plusieurs decennies.
+        if cap.t_last is not None:
             from datetime import datetime as _dt
             try:
                 syslog_anchor = _dt.fromtimestamp(cap.t_last)

@@ -289,7 +289,22 @@ def _rfc3164_epoch(ts_raw: str, now: Optional[datetime] = None,
     now = now or datetime.now()
     # .timestamp() interprete un naif comme de l'heure locale et respecte le
     # fuseau d'un aware : les deux cas donnent le bon instant absolu.
-    now_epoch = now.timestamp()
+    #
+    # Sauf que sur un datetime NAIF, Windows leve OSError [Errno 22] des que
+    # l'instant local tombe avant l'epoch UTC : `datetime.fromtimestamp(3.0)`
+    # en UTC+1 produit 1970-01-01 01:00:03, dont .timestamp() explose. cli.py
+    # construit precisement cette ancre a partir de la capture, et TOUTES les
+    # fixtures pcap de ce projet vivent a l'epoch 0 : un `--syslog` en RFC3164
+    # sur une capture synthetique sortait en erreur 2 avec « Invalid argument »,
+    # message inexploitable pour l'utilisateur (trouve le 25/07/2026).
+    #
+    # Repli : traiter l'ancre comme de l'UTC. On n'en tire que l'ANNEE de
+    # reference et une comparaison a la tolerance de futur — quelques heures
+    # d'ecart n'y changent rien, un plantage si.
+    try:
+        now_epoch = now.timestamp()
+    except (OSError, OverflowError, ValueError):
+        now_epoch = now.replace(tzinfo=timezone.utc).timestamp()
     # L'annee de reference se lit DANS le fuseau cible : a cheval sur le
     # nouvel an, poste et source ne sont pas forcement la meme annee.
     try:
