@@ -10,6 +10,10 @@ import json
 
 from netverdict.cli import main
 
+from pathlib import Path as _P
+# Chemin absolu : la suite doit passer depuis n'importe quel CWD.
+FIXTURES_DIR = _P(__file__).parent / "fixtures"
+
 # slow_app.pcap : client 10.0.0.42:51006 -> serveur 10.0.0.5:5432, t_first=0.
 # Un record connect() vers CE serveur, juste avant le flux.
 AUDIT_CONTENT = (
@@ -25,7 +29,7 @@ def test_analyze_with_audit_attributes_dead_process(tmp_path, capsys):
     log = tmp_path / "audit.log"
     log.write_text(AUDIT_CONTENT, encoding="utf-8")
 
-    rc = main(["analyze", "tests/fixtures/slow_app.pcap",
+    rc = main(["analyze", str(FIXTURES_DIR / "slow_app.pcap"),
                "--audit", str(log), "--json"])
     out = json.loads(capsys.readouterr().out)
 
@@ -43,7 +47,7 @@ def test_analyze_with_audit_attributes_dead_process(tmp_path, capsys):
 
 
 def test_analyze_bad_audit_path_clean_error(tmp_path, capsys):
-    rc = main(["analyze", "tests/fixtures/clean.pcap",
+    rc = main(["analyze", str(FIXTURES_DIR / "clean.pcap"),
                "--audit", str(tmp_path / "absent.log"), "--json"])
     err = capsys.readouterr().err
     assert rc == 2

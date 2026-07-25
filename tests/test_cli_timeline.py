@@ -10,6 +10,10 @@ import json
 
 from netverdict.cli import main
 
+from pathlib import Path as _P
+# Chemin absolu : la suite doit passer depuis n'importe quel CWD.
+FIXTURES_DIR = _P(__file__).parent / "fixtures"
+
 # slow_app.pcap : premier paquet a t=0.0, dernier a t~3.002 (epoch 1970).
 # Fenetre attendue : [0 - 900, 3.002].
 SYSLOG_CONTENT = "\n".join([
@@ -27,7 +31,7 @@ def test_analyze_with_syslog_timeline(tmp_path, capsys):
     log = tmp_path / "fw.log"
     log.write_text(SYSLOG_CONTENT, encoding="utf-8")
 
-    rc = main(["analyze", "tests/fixtures/slow_app.pcap",
+    rc = main(["analyze", str(FIXTURES_DIR / "slow_app.pcap"),
                "--syslog", str(log), "--json"])
     out = json.loads(capsys.readouterr().out)
 
@@ -49,7 +53,7 @@ def test_analyze_with_syslog_timeline(tmp_path, capsys):
 
 
 def test_analyze_bad_events_path_clean_error(tmp_path, capsys):
-    rc = main(["analyze", "tests/fixtures/clean.pcap",
+    rc = main(["analyze", str(FIXTURES_DIR / "clean.pcap"),
                "--events", str(tmp_path / "absent.xml"), "--json"])
     err = capsys.readouterr().err
     assert rc == 2

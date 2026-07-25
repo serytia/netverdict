@@ -151,6 +151,13 @@ def render_console(cap: Capture, verdicts: list[FlowVerdict],
     if st.unsupported_linktype:
         con.print(Text("attention : linktype partiellement supporte, "
                        "des trames ont ete ignorees", style="bold red"))
+    if st.mixed_linktypes:
+        con.print(Text(
+            "ATTENTION : cette capture declare PLUSIEURS interfaces de types "
+            "differents (fusion type mergecap). Seul le type de la premiere "
+            "est applique : les paquets des autres sont comptes « non-IP » et "
+            "N'APPARAISSENT PAS dans les verdicts. Analyser chaque capture "
+            "separement.", style="bold red"))
 
     ordered = sorted(verdicts, key=_sort_key)
     shown = 0
@@ -267,7 +274,8 @@ def to_json(cap: Capture, verdicts: list[FlowVerdict],
         "netverdict": 1,
         "stats": {"packets": st.total, "tcp": st.tcp, "icmp": st.icmp,
                   "non_ip": st.non_ip, "parse_errors": st.parse_errors,
-                  "linktype": st.linktype},
+                  "linktype": st.linktype,
+                  "mixed_linktypes": st.mixed_linktypes},
         "flows": [],
     }
     for index, fv in enumerate(verdicts):

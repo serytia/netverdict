@@ -96,6 +96,43 @@ class IcmpEvent:
         return self.type == 3 and self.code == self.FRAG_NEEDED
 
 
+def _detect_mixed_linktypes(path) -> bool:
+    """Le pcapng declare-t-il plusieurs linktypes distincts ?
+
+    Lecture directe des blocs IDB (type 0x00000001) : dpkt n'expose pas cette
+    information. Toute anomalie de structure retourne False — cette fonction
+    est un DETECTEUR D'AVERTISSEMENT, elle ne doit jamais empecher une lecture
+    par ailleurs valide.
+    """
+    import struct
+
+    try:
+        data = open(path, "rb").read(1 << 20)      # les IDB sont en tete
+    except OSError:
+        return False
+    if not data.startswith(PCAPNG_MAGIC):
+        return False                               # pcap classique : 1 seul linktype
+    endian = "<"
+    if len(data) >= 12 and struct.unpack_from("<I", data, 8)[0] == 0x4D3C2B1A:
+        endian = ">"
+    linktypes: set[int] = set()
+    pos = 0
+    while pos + 12 <= len(data):
+        try:
+            btype, blen = struct.unpack_from(endian + "II", data, pos)
+        except struct.error:
+            break
+        if blen < 12 or pos + blen > len(data):
+            break
+        if btype == 0x00000001:                    # IDB
+            try:
+                linktypes.add(struct.unpack_from(endian + "H", data, pos + 8)[0])
+            except struct.error:
+                break
+        pos += blen
+    return len(linktypes) > 1
+
+
 @dataclass
 class ParseStats:
     """Comptabilite de lecture — publiee dans le rapport pour l'honnetete :
@@ -109,6 +146,10 @@ class ParseStats:
     parse_errors: int = 0
     linktype: int = -1
     unsupported_linktype: bool = False
+    # Le pcapng declare plusieurs interfaces de linktypes differents : les
+    # paquets de la ou des autres interfaces sont decodes avec le mauvais
+    # format et finissent en non_ip. Le rapport DOIT le dire (voir report.py).
+    mixed_linktypes: bool = False
 
 
 @dataclass
@@ -255,6 +296,15 @@ def read_capture(path: str | Path) -> Capture:
     """
     cap = Capture()
     st = cap.stats
+    # Un pcapng peut declarer PLUSIEURS interfaces (un bloc IDB chacune), aux
+    # linktypes differents — c'est exactement ce que produit un `mergecap`
+    # d'une capture client et d'une capture serveur, geste que la remediation
+    # AMBIGU de cet outil recommande elle-meme. Or dpkt.pcapng ne retient que
+    # le PREMIER IDB et n'expose pas l'interface de chaque paquet : tout
+    # serait decode avec le mauvais linktype pour l'une des deux moities, qui
+    # tomberait silencieusement en « non-IP » (audit du 26/07). On ne peut pas
+    # decoder correctement sans sortir de dpkt, mais on peut REFUSER DE MENTIR.
+    st.mixed_linktypes = _detect_mixed_linktypes(path)
     with open(path, "rb") as f:
         reader = _open_reader(f)
         st.linktype = getattr(reader, "datalink", lambda: -1)()

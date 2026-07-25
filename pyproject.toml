@@ -17,6 +17,10 @@ dependencies = [
     "dpkt>=1.9.8",
     "rich>=13.0",
     "pyyaml>=6.0",
+    # Windows n'embarque PAS la base IANA : sans tzdata, --syslog-tz
+    # Europe/Paris echoue apres un `pip install` nu, alors que l'aide et le
+    # README annoncent ce format au meme rang que les autres.
+    "tzdata; sys_platform == 'win32'",
 ]
 
 [project.optional-dependencies]

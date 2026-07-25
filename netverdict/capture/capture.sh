@@ -34,6 +34,12 @@ if [ "$(id -u)" -ne 0 ]; then
   exit 2
 fi
 command -v tcpdump >/dev/null || { echo "tcpdump absent (apt install tcpdump)" >&2; exit 2; }
+# ss etait suppose present : sur une image minimale (conteneur, Alpine) son
+# absence etait avalee par un `|| true` et produisait un snapshot avec
+# "connections": [] — que netverdict accepte sans broncher. Le rapport
+# affichait alors un etat hote credible SANS jamais pouvoir attribuer un
+# process : capacite silencieusement inerte (audit du 26/07).
+command -v ss >/dev/null || { echo "ss absent (apt install iproute2) : sans lui le snapshot n'aurait aucune connexion" >&2; exit 2; }
 
 OUTDIR="${OUTDIR:-./netverdict-capture-$(date +%Y%m%d-%H%M%S)}"
 mkdir -p "$OUTDIR"
@@ -47,6 +53,9 @@ FILTER="tcp or icmp"
 echo "Capture tcpdump ${DURATION}s -> $PCAP  (filtre: $FILTER)"
 tcpdump -i any -s 96 -w "$PCAP" $FILTER &
 TCPDUMP_PID=$!
+# Sans ce trap, une sortie anticipee (erreur du snapshot, Ctrl-C) laissait
+# tcpdump orphelin en train d'ecrire indefiniment dans le fichier.
+trap 'kill "$TCPDUMP_PID" 2>/dev/null' EXIT INT TERM
 
 sleep "$(( DURATION / 2 > 0 ? DURATION / 2 : 1 ))"
 echo "Snapshot etat hote..."

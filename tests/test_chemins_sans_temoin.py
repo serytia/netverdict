@@ -29,6 +29,10 @@ from netverdict.rules.engine import FlowVerdict, evaluate, load_rules
 from netverdict.signals import FlowSignals
 from netverdict.timeline import ConnectionInfo, Timeline, TimelineEvent
 
+from pathlib import Path as _P
+# Chemin absolu : la suite doit passer depuis n'importe quel CWD.
+FIXTURES_DIR = _P(__file__).parent / "fixtures"
+
 
 @pytest.fixture(scope="module")
 def regles():
@@ -122,7 +126,7 @@ class TestAncrageDeLAnneeSyslog:
     def test_l_annee_vient_de_la_capture_et_non_du_poste(self, tmp_path, capsys):
         log = tmp_path / "fw.log"
         log.write_text(self.LIGNE, encoding="utf-8")
-        rc = main(["analyze", "tests/fixtures/slow_app.pcap",
+        rc = main(["analyze", str(FIXTURES_DIR / "slow_app.pcap"),
                    "--syslog", str(log), "--syslog-tz", "UTC", "--json"])
         out = json.loads(capsys.readouterr().out)
         assert rc == 1

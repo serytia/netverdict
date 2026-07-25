@@ -1,0 +1,90 @@
+name: CI
+
+# Le projet a ete developpe sur Windows et cible surtout des admins Linux :
+# sans matrice, les pannes croisees ne se voient nulle part. Les trois jobs
+# supplementaires (fuseau decale, extras, wheel) ne sont pas decoratifs — ils
+# correspondent chacun a un defaut REEL trouve en audit le 26/07/2026.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  tests:
+    name: ${{ matrix.os }} / py${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux = la cible reelle (auditd, syslog, tcpdump). 3.11 est le
+          # plancher declare : rien ne le testait, une syntaxe 3.12 y serait
+          # passee inapercue jusqu'au premier utilisateur Debian 12.
+          - { os: ubuntu-latest, python: "3.11" }
+          - { os: ubuntu-latest, python: "3.12" }
+          - { os: ubuntu-latest, python: "3.13" }
+          # Windows = plateforme de dev a proteger : les pannes d'encodage et
+          # de datation vivent la.
+          - { os: windows-latest, python: "3.11" }
+          - { os: windows-latest, python: "3.13" }
+          # macOS : prouver que `analyze` marche et que `capture` refuse
+          # proprement. Rien a capturer ici.
+          - { os: macos-latest, python: "3.13" }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: pip install -e ".[dev]"
+      - run: pytest -q
+
+  fuseau-decale:
+    # Le bug d'ancre RFC3164 ne se voit QUE a l'ouest de Greenwich : depuis
+    # Paris la suite etait verte avec le defaut en place.
+    name: TZ America/New_York (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    env:
+      TZ: America/New_York
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.13" }
+      - run: pip install -e ".[dev]"
+      - run: pytest -q
+
+  extras:
+    # Les extras optionnels ne sont exerces nulle part : la branche
+    # « python-evtx present » du parseur EVTX n'a aucune couverture sans ce job.
+    name: extras (evtx)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.13" }
+      - run: pip install -e ".[dev,evtx]"
+      - run: pytest -q -rs
+
+  wheel:
+    # Installer le PAQUET, pas le depot : c'est exactement le mode d'echec
+    # qui avait casse `netverdict capture` en 0.3.0 (chemin de donnees
+    # correct depuis les sources, faux une fois installe).
+    name: wheel installe
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.13" }
+      - run: pip install build && python -m build --wheel
+      - run: pip install dist/*.whl
+      - name: la CLI fonctionne hors du depot
+        run: |
+          cd /tmp
+          netverdict --version
+          netverdict rules
+          netverdict analyze "$GITHUB_WORKSPACE/tests/fixtures/clean.pcap"

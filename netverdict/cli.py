@@ -85,9 +85,18 @@ def cmd_analyze(args: argparse.Namespace) -> int:
         # sans le moindre signal — meme panne muette que celle corrigee dans
         # correlate.py, et elle deplace les evenements de plusieurs decennies.
         if cap.t_last is not None:
-            from datetime import datetime as _dt
+            from datetime import datetime as _dt, timezone as _tz
             try:
-                syslog_anchor = _dt.fromtimestamp(cap.t_last)
+                # Ancre AWARE en UTC, jamais naive locale : sous Windows
+                # fromtimestamp() sans fuseau leve pour un instant local
+                # anterieur a l'epoch (poste a l'ouest de Greenwich + capture
+                # proche de 0), et le repli du parseur syslog relisait alors
+                # l'ancre comme de l'UTC — l'annee de reference basculait de
+                # 1970 a 1969, les lignes RFC3164 sortaient de la fenetre et
+                # le rapport affirmait « aucun changement detecte ». Avec un
+                # fuseau explicite, fromtimestamp n'appelle jamais localtime
+                # et le calcul est de l'arithmetique pure (audit du 26/07).
+                syslog_anchor = _dt.fromtimestamp(cap.t_last, _tz.utc)
             except (OSError, OverflowError, ValueError):
                 syslog_anchor = None
         for path in args.syslog:
@@ -143,8 +152,21 @@ def cmd_capture(args: argparse.Namespace) -> int:
     # cible devenait site-packages/capture et la sous-commande sortait en
     # erreur 2 pour TOUT utilisateur installe, alors qu'elle est annoncee dans
     # l'aide (verifie sur le wheel 0.3.0 le 25/07/2026).
+    # Refuser explicitement plutot que de lancer le script Linux sur un OS
+    # qui n'en a aucune des briques : sur macOS, capture.sh echoue sur `ss`
+    # (inexistant), /proc/loadavg (inexistant) et `tcpdump -i any` (pas de
+    # pseudo-interface `any` en BSD), en laissant un tcpdump orphelin en train
+    # d'ecrire. Mieux vaut un message honnete (audit du 26/07).
+    systeme = platform.system()
+    if systeme not in ("Windows", "Linux"):
+        print(f"`netverdict capture` ne gere que Windows et Linux "
+              f"(detecte : {systeme or 'inconnu'}).\n"
+              f"Capturer avec l'outil natif du systeme, puis analyser :\n"
+              f"  sudo tcpdump -i <interface> -s 96 -w capture.pcap\n"
+              f"  netverdict analyze capture.pcap", file=sys.stderr)
+        return 2
     here = Path(__file__).parent / "capture"
-    if platform.system() == "Windows":
+    if systeme == "Windows":
         script = here / "capture.ps1"
         cmd = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
                "-File", str(script)]
@@ -162,7 +184,14 @@ def cmd_capture(args: argparse.Namespace) -> int:
     if not script.exists():
         print(f"Script de capture introuvable : {script}", file=sys.stderr)
         return 2
-    return subprocess.call(cmd)
+    try:
+        return subprocess.call(cmd)
+    except FileNotFoundError:
+        # bash absent (Alpine/busybox, image distroless) ou powershell hors
+        # du PATH : un traceback nu n'aide personne.
+        print(f"Interpreteur introuvable : `{cmd[0]}` n'est pas installe ou "
+              f"absent du PATH.", file=sys.stderr)
+        return 2
 
 
 def cmd_rules(args: argparse.Namespace) -> int:
@@ -178,6 +207,20 @@ def cmd_rules(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Sortie en UTF-8, quelle que soit la console. Sans ca, sous Windows, un
+    # stdout redirige encode en cp1252 : une donnee LINUX parfaitement banale
+    # (hostname non latin-1, message syslog, proctitle auditd) faisait lever
+    # UnicodeEncodeError en plein print. Le JSON etant emis en UN SEUL print,
+    # le fichier de sortie faisait 0 OCTET et le process rendait 1 — le meme
+    # code que « des verdicts ont ete trouves » : un script appelant ne pouvait
+    # pas distinguer un probleme trouve d'un rapport perdu (audit du 26/07).
+    # errors="replace" plutot que strict : mieux vaut un caractere de
+    # remplacement qu'un rapport perdu.
+    for flux in (sys.stdout, sys.stderr):
+        try:
+            flux.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass          # flux remplace par un test ou non reconfigurable
     p = argparse.ArgumentParser(
         prog="netverdict",
         description="Triage d'incident : la capture dit si c'est le reseau, "
