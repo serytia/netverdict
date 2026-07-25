@@ -132,6 +132,12 @@ Ajouter ses propres regles : `netverdict analyze ... --rules mes_regles.yaml`
 
 - TCP/IPv4-IPv6 uniquement (pas d'UDP/QUIC, pas de reassemblage de fragments).
 - RTT p95 pollue par les delayed ACK (~40-200 ms) : min et p50 sont fiables.
+  Aucune regle ne rend donc un verdict RESEAU sur le seul p95. En revanche un
+  p95 eleve n'est pas ignore : une mediane saine avec une queue significative
+  produit un verdict AMBIGU explicite (« pics de latence que la capture ne sait
+  pas attribuer »), qui nomme les deux causes possibles — gigue du chemin ou
+  delayed ACK — et donne de quoi les separer. Ni faux verdict reseau, ni faux
+  « transport sain ».
 - Sens client/serveur estime par heuristique si la capture demarre en pleine
   session (signale dans le rapport).
 - Le snapshot hote vient d'une seule machine (celle ou on a lance la capture).

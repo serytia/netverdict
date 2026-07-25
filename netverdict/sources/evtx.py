@@ -422,10 +422,23 @@ def _parse_event_element(ev: ET.Element) -> Optional[TimelineEvent]:
     # Sysmon Event 3 : on extrait la jointure process<->connexion, et on
     # fabrique un resume lisible plutot que le "Name=valeur" generique.
     connection: Optional[ConnectionInfo] = None
+    champs: dict[str, str] = {}
     if provider == _SYSMON_PROVIDER and ident == _SYSMON_NETWORK_CONNECT:
-        connection = _sysmon_connection(_eventdata_map(ev, p))
+        champs = _eventdata_map(ev, p)
+        connection = _sysmon_connection(champs)
 
     if connection is not None:
+        # HORODATAGE : TimeCreated est le moment ou le journal a ECRIT le
+        # record ; UtcTime est le moment ou la connexion a eu lieu. Pour une
+        # jointure avec un pcap, seul le second a du sens — l'ecriture peut
+        # etre differee (charge, buffer du canal), et le decalage faisait
+        # sortir l'evenement de la fenetre du flux SANS AUCUN SIGNAL, ou
+        # elisait le mauvais process quand un port avait ete reutilise.
+        # On ne bascule que si UtcTime est exploitable : sinon TimeCreated
+        # reste une approximation utilisable, pas une raison de tout jeter.
+        utc = _parse_system_time(champs.get("UtcTime", ""))
+        if utc is not None:
+            ts = utc
         c = connection
         resume = (f"{desc} : {c.process_label()} "
                   f"{c.src_ip}:{c.src_port} -> {c.dst_ip}:{c.dst_port}")

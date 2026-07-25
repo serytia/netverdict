@@ -94,11 +94,42 @@ class FlowSignals:
     # reference est le meilleur RTT observe dans la capture elle-meme.
     rtt_ratio_p95_min: Optional[float] = None
 
+    # Dispersion du RTT sur la MEDIANE et non le p95. Le p95 est pollue par les
+    # delayed ACK (~40-200 ms) : sur un flux applicatif lent, une poignee
+    # d'echantillons suffisait a faire conclure « latence instable » et a rendre
+    # un verdict RESEAU sur un probleme purement applicatif. La mediane resiste
+    # a ces valeurs isolees — le README declare deja min et p50 fiables.
+    rtt_ratio_p50_min: Optional[float] = None
+
+    # FORME DE LA QUEUE : p95 rapporte a la MEDIANE, et non au minimum. Repond a
+    # « la latence a-t-elle des pics ? » alors que les deux ratios ci-dessus
+    # repondent « la latence s'ecarte-t-elle du meilleur cas ? » — question a
+    # laquelle un LAN repond toujours oui (minimum sub-milliseconde).
+    # Distingue un WAN stable a 80 ms (p95/p50 ~ 1) d'un lien qui pique
+    # (p95/p50 de 400 mesure sur un flux netem du lab). Sans lui, aucune regle
+    # ne pouvait separer les deux, et un flux a p50 15 ms / p95 400 ms sortait
+    # « transport sain » (mesure du 25/07/2026).
+    rtt_ratio_p95_p50: Optional[float] = None
+    # Combien de fois la reponse applicative est plus lente que l'acquittement
+    # TCP de la requete. C'EST la preuve que le delai est dans le serveur, et
+    # elle ne depend pas d'un seuil absolu : un ACK a 60 ms face a une reponse
+    # a 900 ms prouve exactement la meme chose qu'un ACK a 5 ms face a 500 ms.
+    ttfb_over_ack_ratio: Optional[float] = None
+
     # Zero window (recepteur sature : l'app ne lit pas sa socket)
     zw_from_client: int = 0
     zw_from_server: int = 0
+    # Agregats des DEUX sens : vue d'ensemble seulement. Une regle qui accuse
+    # un hote PRECIS ne doit jamais s'en servir — voir les champs par sens.
     zw_max_ms: float = 0.0
     zw_total_ms: float = 0.0
+    # Durees PAR SENS. Sans elles, quand client ET serveur annoncent du
+    # zero-window, zero-window-server s'attribuait la duree du CLIENT et
+    # accusait le mauvais hote avec une preuve fausse (revue du 25/07/2026).
+    zw_max_ms_from_client: float = 0.0
+    zw_total_ms_from_client: float = 0.0
+    zw_max_ms_from_server: float = 0.0
+    zw_total_ms_from_server: float = 0.0
 
     # Comportement applicatif
     exchanges: int = 0
@@ -127,6 +158,21 @@ class FlowSignals:
     def as_dict(self) -> dict:
         from dataclasses import asdict
         return asdict(self)
+
+
+def _add_zw(sig: "FlowSignals", from_client: bool, dur_ms: float) -> None:
+    """Comptabilise une periode de fenetre fermee, dans l'agregat ET dans le
+    sens qui l'a annoncee. Le zero-window est emis par le RECEPTEUR : c'est
+    donc lui qui ne lit pas sa socket, et c'est lui qu'une regle doit accuser.
+    """
+    sig.zw_total_ms += dur_ms
+    sig.zw_max_ms = max(sig.zw_max_ms, dur_ms)
+    if from_client:
+        sig.zw_total_ms_from_client += dur_ms
+        sig.zw_max_ms_from_client = max(sig.zw_max_ms_from_client, dur_ms)
+    else:
+        sig.zw_total_ms_from_server += dur_ms
+        sig.zw_max_ms_from_server = max(sig.zw_max_ms_from_server, dur_ms)
 
 
 def compute_signals(fl: Flow) -> FlowSignals:
@@ -165,6 +211,11 @@ def compute_signals(fl: Flow) -> FlowSignals:
             self.pending: dict[int, float] = {}      # seq_end -> ts (RTT)
             self.max_seq_end: Optional[int] = None
             self.t_max_seq: float = 0.0              # ts du plus haut octet emis
+            # Le pair a-t-il deja reclame une retransmission par dup-ACK ?
+            # Passe a True des la 3e dup-ACK du sens oppose : ensuite, un
+            # renvoi rapide de CE sens est un fast retransmit, pas un
+            # reordonnancement de capture.
+            self.dup_ack_reclame: bool = False
             self.last_ack: Optional[int] = None
             self.last_win: Optional[int] = None
             self.dup_run = 0
@@ -216,9 +267,7 @@ def compute_signals(fl: Flow) -> FlowSignals:
                 if me.zw_open_ts is None:
                     me.zw_open_ts = p.ts
             elif me.zw_open_ts is not None:
-                dur = (p.ts - me.zw_open_ts) * 1000.0
-                sig.zw_total_ms += dur
-                sig.zw_max_ms = max(sig.zw_max_ms, dur)
+                _add_zw(sig, op.from_client, (p.ts - me.zw_open_ts) * 1000.0)
                 me.zw_open_ts = None
 
         # ---- Donnees : retransmissions, RTT, volumes, TTFB -------------------
@@ -232,7 +281,12 @@ def compute_signals(fl: Flow) -> FlowSignals:
             if is_keepalive:
                 pass
             elif is_old_data:
-                if (p.ts - me.t_max_seq) >= _OOO_WINDOW_S:
+                # Retransmission si l'arrivee est hors fenetre de
+                # reordonnancement, OU si le pair a deja reclame par dup-ACK :
+                # dans ce second cas, un renvoi rapide est un FAST RETRANSMIT,
+                # pas un paquet remis dans l'ordre par la capture.
+                if ((p.ts - me.t_max_seq) >= _OOO_WINDOW_S
+                        or me.dup_ack_reclame):
                     if op.from_client:
                         sig.retrans_c2s += 1
                     else:
@@ -289,6 +343,13 @@ def compute_signals(fl: Flow) -> FlowSignals:
                             sig.dup_ack_bursts_from_client += 1
                         else:
                             sig.dup_ack_bursts_from_server += 1
+                        # Le PAIR vient de reclamer une retransmission. Tout
+                        # renvoi de sa part sera une retransmission, meme
+                        # arrivee en moins de _OOO_WINDOW_S : sur un LAN, un
+                        # fast retransmit est plus rapide que la fenetre de
+                        # reordonnancement, et le flux perdait alors TOUTES
+                        # ses retransmissions (revue du 25/07/2026).
+                        other.dup_ack_reclame = True
                 else:
                     me.dup_run = 0
                 me.last_ack, me.last_win = p.ack, p.win
@@ -331,19 +392,38 @@ def compute_signals(fl: Flow) -> FlowSignals:
     sig.rtt_ms_p95 = _pctl(rtt_samples, 0.95)
     if sig.rtt_ms_min and sig.rtt_ms_p95 and sig.rtt_ms_min > 0:
         sig.rtt_ratio_p95_min = sig.rtt_ms_p95 / sig.rtt_ms_min
+    # Meme dispersion, mesuree sur la mediane : insensible aux delayed ACK,
+    # c'est celle sur laquelle une regle peut juger sans risquer un faux
+    # verdict RESEAU (voir le champ dans FlowSignals).
+    if sig.rtt_ms_min and sig.rtt_ms_p50 and sig.rtt_ms_min > 0:
+        sig.rtt_ratio_p50_min = sig.rtt_ms_p50 / sig.rtt_ms_min
+    # Forme de la queue. Plancher de 1 ms au denominateur, meme raison que pour
+    # ttfb_over_ack_ratio : une mediane de 0,01 ms sur un LAN fabriquerait un
+    # rapport de plusieurs milliers a partir d'une queue de 0,03 ms. Sous la
+    # milliseconde, la queue se juge contre 1 ms — cela n'enleve rien aux vrais
+    # pics (52 ms sortent a x52) et supprime la fausse precision.
+    if sig.rtt_ms_p95 is not None and sig.rtt_ms_p50 is not None:
+        sig.rtt_ratio_p95_p50 = sig.rtt_ms_p95 / max(1.0, sig.rtt_ms_p50)
 
     sig.exchanges = len(ttfb_samples)
     sig.ttfb_ms_p50 = _pctl(ttfb_samples, 0.50)
     sig.ttfb_ms_p95 = _pctl(ttfb_samples, 0.95)
     sig.ttfb_ms_max = max(ttfb_samples) if ttfb_samples else None
     sig.server_ack_delay_ms_p95 = _pctl(ack_delay_samples, 0.95)
+    # Rapport reponse/acquittement : la vraie preuve que le delai est dans le
+    # serveur. Un plancher de 1 ms evite de diviser par une mesure sous la
+    # resolution utile et de fabriquer un rapport astronomique.
+    if sig.ttfb_ms_p95 is not None and sig.server_ack_delay_ms_p95 is not None:
+        sig.ttfb_over_ack_ratio = (sig.ttfb_ms_p95
+                                   / max(1.0, sig.server_ack_delay_ms_p95))
 
-    # Periode zero-window jamais refermee : compter jusqu'a la fin du flux.
-    for d in (c2s, s2c):
+
+    # Periode zero-window jamais refermee : compter jusqu'a la fin du flux,
+    # dans le bon sens (c2s = annoncee par le client, s2c = par le serveur).
+    for d, from_client in ((c2s, True), (s2c, False)):
         if d.zw_open_ts is not None:
-            dur = (pkts[-1].pkt.ts - d.zw_open_ts) * 1000.0
-            sig.zw_total_ms += dur
-            sig.zw_max_ms = max(sig.zw_max_ms, dur)
+            _add_zw(sig, from_client,
+                    (pkts[-1].pkt.ts - d.zw_open_ts) * 1000.0)
 
     if rst_info is not None:
         from_client, rst_ts, data_before = rst_info

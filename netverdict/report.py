@@ -206,7 +206,14 @@ def render_console(cap: Capture, verdicts: list[FlowVerdict],
             body.append("\nPiste de correction :\n", style="bold")
             for line in m.remediation.splitlines():
                 body.append(f"  {line}\n")
-        secondary = fv.matches[1:]
+        # Une regle RAS n'est jamais listee en signal secondaire : son titre
+        # affirme « le probleme n'est pas dans cette conversation reseau », ce
+        # qui contredit mot pour mot le verdict imprime juste au-dessus. Sur les
+        # captures netem du lab, un flux a gigue franche sortait « RESEAU [...]
+        # Signaux secondaires : clean (RAS) » — l'admin ne peut pas savoir
+        # laquelle des deux lignes croire. Le match reste expose en JSON, qui
+        # porte aussi le verdict faisant autorite.
+        secondary = [x for x in fv.matches[1:] if x.verdict != "RAS"]
         if secondary:
             body.append("\nSignaux secondaires : ", style="dim")
             body.append(", ".join(f"{x.rule.id} ({x.verdict})"

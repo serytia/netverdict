@@ -32,6 +32,36 @@ rules:
       matche ce couple source/destination/port, et verifier si le refus est
       voulu (durcissement recent ?) ou une regle trop large.
 
+  # SYN sans SYN/ACK, mais avec des ICMP unreachable rattaches. Situation
+  # DIFFERENTE du silence complet : un equipement ou l'hote a explicitement
+  # signale l'injoignabilite. La regle existe parce que syn-no-answer affirmait
+  # « aucun ICMP » dans ce cas — une preuve contredite par le pcap lui-meme.
+  - id: syn-no-answer-icmp-unreach
+    verdict: RESEAU
+    priority: 91
+    confidence: haute
+    title: "SYN sans reponse, mais ICMP unreachable recus : destination injoignable signalee"
+    when:
+      all:
+        - "syn_count >= 2"
+        - "synack_seen == false"
+        - "rst_to_syn == false"
+        - "icmp_unreach_count >= 1"
+    unless:
+      # Un REJECT explicite est plus precis : reject-icmp raconte mieux.
+      - "icmp_admin_prohibited == true"
+    evidence:
+      - "{syn_count} SYN de {client} vers {server}:{sport} etales sur {syn_span_s:.1f}s — aucun SYN/ACK, mais {icmp_unreach_count} ICMP unreachable rattache(s) au flux"
+    remediation: |
+      Contrairement a un DROP silencieux, quelque chose a REPONDU : un ICMP
+      unreachable. Cela restreint fortement le champ :
+      1. Lire le type/code exact de l'ICMP et son emetteur (--json) : c'est lui
+         qui designe l'equipement ou l'hote qui declare l'injoignabilite.
+      2. Si l'emetteur est un routeur : route absente ou interface down en aval.
+      3. Si l'emetteur est {server} lui-meme : l'hote est la mais le port ou le
+         protocole est ferme au niveau IP (host/port unreachable).
+      4. Verifier la resolution/ARP du dernier saut avant {server}.
+
   - id: syn-no-answer
     verdict: RESEAU
     priority: 90
@@ -44,6 +74,11 @@ rules:
         - "syn_count >= 2"
         - "synack_seen == false"
         - "rst_to_syn == false"
+        # La preuve ci-dessous AFFIRME « aucun ICMP ». La regle ne doit donc pas
+        # matcher quand des ICMP unreachable ont ete rattaches, sinon le rapport
+        # contredit le pcap qu'il vient de lire (revue du 25/07/2026). Ce cas a
+        # sa propre regle : syn-no-answer-icmp-unreach, juste au-dessus.
+        - "icmp_unreach_count == 0"
     unless:
       # Si un REJECT explicite existe, la regle reject-icmp raconte mieux.
       - "icmp_admin_prohibited == true"
@@ -106,10 +141,16 @@ rules:
         # Une annonce isolee de quelques ms arrive dans la vie normale d'un
         # buffer ; 100 ms fenetre fermee = l'application n'a pas consomme
         # pendant 100 ms, ce n'est plus du reglage fin.
+        #
+        # DUREE PAR SENS, jamais l'agregat : quand les DEUX hotes annoncent du
+        # zero-window (banal sur un transfert bidirectionnel sature), zw_max_ms
+        # porte le maximum des deux cotes. Cette regle accusait alors le
+        # serveur avec la duree du CLIENT : mauvais hote, preuve fausse, et
+        # l'admin part fouiller la machine innocente (revue du 25/07/2026).
         - "zw_from_server >= 1"
-        - "zw_max_ms >= 100"
+        - "zw_max_ms_from_server >= 100"
     evidence:
-      - "{zw_from_server} annonces zero-window de {server}, fenetre fermee jusqu'a {zw_max_ms:.0f} ms (cumul {zw_total_ms:.0f} ms)"
+      - "{zw_from_server} annonces zero-window de {server}, fenetre fermee jusqu'a {zw_max_ms_from_server:.0f} ms (cumul {zw_total_ms_from_server:.0f} ms)"
     remediation: |
       Le RESEAU EST HORS DE CAUSE : il a livre, c'est {server} qui ne consomme
       pas. La socket du service n'est pas lue assez vite. Cote serveur,
@@ -130,9 +171,15 @@ rules:
         - "handshake_complete == true"
         - "exchanges >= 1"
         - "ttfb_ms_p95 >= 500"
-        # La preuve : la pile TCP du serveur a acquitte la requete en <50 ms,
-        # la reponse a mis 10x plus. Le delai est DANS le serveur.
-        - "server_ack_delay_ms_p95 < 50"
+        # La preuve est un RAPPORT, pas un seuil absolu : l'acquittement TCP est
+        # bien plus rapide que la reponse, donc le delai est DANS le serveur.
+        # L'ancien « server_ack_delay_ms_p95 < 50 » laissait passer entre les
+        # mailles un cas pourtant evident — ACK a 60 ms, reponse a 900 ms (15x) —
+        # que plus AUCUNE regle ne matchait : le flux ressortait « anodin »
+        # (revue du 25/07/2026). Le rapport de 5 couvre ce cas sans affaiblir la
+        # preuve, et le plafond absolu ci-dessous garde la borne de bon sens.
+        - "ttfb_over_ack_ratio >= 5"
+        - "server_ack_delay_ms_p95 < 250"
         - "retrans_rate < 0.01"
     evidence:
       - "{exchanges} echanges : ACK serveur en {server_ack_delay_ms_p95:.0f} ms mais reponse en {ttfb_ms_p50:.0f} ms (p50) / {ttfb_ms_p95:.0f} ms (p95), 0 perte"
@@ -151,10 +198,11 @@ rules:
     title: "Le client ne lit plus sa socket (zero window) : poste/app cliente saturee"
     when:
       all:
+        # Duree cote CLIENT uniquement, meme raison que zero-window-server.
         - "zw_from_client >= 1"
-        - "zw_max_ms >= 100"
+        - "zw_max_ms_from_client >= 100"
     evidence:
-      - "{zw_from_client} annonces zero-window de {client}, fenetre fermee jusqu'a {zw_max_ms:.0f} ms"
+      - "{zw_from_client} annonces zero-window de {client}, fenetre fermee jusqu'a {zw_max_ms_from_client:.0f} ms"
     remediation: |
       C'est le POSTE CLIENT qui n'absorbe pas ce que le serveur envoie
       (application cliente bloquee, machine saturee). Le reseau et le serveur
@@ -217,12 +265,24 @@ rules:
     title: "Latence instable : gigue forte (congestion probable)"
     when:
       all:
-        # Dispersion INTERNE a la capture : pas besoin de baseline externe.
-        # p95 >= 8x le minimum = le chemin varie enormement ; plancher 50 ms
-        # pour ignorer la micro-variation d'un LAN (0.2 -> 1.6 ms est sain).
-        - "rtt_ms_p95 >= 50"
+        # Jugee sur la MEDIANE, jamais sur le p95 : le p95 est pollue par les
+        # delayed ACK (~40-200 ms), fait deja documente en limite connue, et
+        # quelques ACK differes suffisaient a rendre un verdict RESEAU sur un
+        # probleme purement applicatif (revue du 25/07/2026).
+        #
+        # MESURE sur les pcaps du lab, qui a corrige deux idees fausses :
+        #   jitter (netem reel) : p50 28-96 ms, ratio 361-1169, ZERO perte
+        #   clean               : p50 0.0-0.9 ms, ratio jusqu'a 62 (!)
+        #   slow_app            : p50 0.0 ms,    ratio 3.9-8.1
+        # 1) Le RATIO SEUL ne discrimine rien : sur un LAN le minimum est
+        #    sub-milliseconde, donc n'importe quel rapport explose — 'clean'
+        #    atteint 62. C'est la valeur ABSOLUE de la mediane qui separe.
+        # 2) Une gigue reelle ne laisse AUCUNE trace de perte : exiger une
+        #    corroboration par retransmission ou dup-ACK faisait rater le
+        #    scenario netem du lab. Idee abandonnee, mesure en main.
         - "rtt_ms_min > 0"
-        - "rtt_ratio_p95_min >= 8"
+        - "rtt_ms_p50 >= 20"
+        - "rtt_ratio_p50_min >= 4"
     evidence:
       - "RTT min {rtt_ms_min:.1f} ms mais p95 {rtt_ms_p95:.1f} ms (x{rtt_ratio_p95_min:.0f}) sur {pkts_total} paquets"
     remediation: |
@@ -252,6 +312,54 @@ rules:
          a emis le RST).
       Le cote emetteur du RST ({rst_emitter}) dit ou commencer.
 
+  - id: latency-tail-unexplained
+    verdict: AMBIGU
+    priority: 25
+    confidence: faible
+    title: "Pics de latence que la capture ne sait pas attribuer"
+    when:
+      all:
+        - "handshake_complete == true"
+        # Mediane saine, donc rtt-degraded (priorite 70) ne couvre pas ce cas.
+        # C'est AUSSI cette condition qui met les WAN a latence uniformement
+        # elevee hors de portee de cette regle — un lien stable a 80 ms a une
+        # mediane de 80 ms et ne peut pas matcher ici.
+        - "rtt_ms_p50 < 20"
+        # Queue ABSOLUE significative. Mesure du lab : tous les flux sains
+        # plafonnent a 1,41 ms de p95, tous les flux netem degrades demarrent a
+        # 29 ms. Trois ordres de grandeur separent les deux familles.
+        - "rtt_ms_p95 >= 20"
+        # ...et c'est bien une QUEUE, pas un plateau : un lien stable a 19,9 ms
+        # de mediane et 20 ms de p95 franchit le seuil absolu ci-dessus sans
+        # avoir le moindre pic. Voila ce que cette condition protege — et NON le
+        # WAN a 80 ms, deja exclu par la mediane (rationnel corrige apres
+        # mesure : le commentaire precedent nommait la mauvaise garde).
+        #
+        # Seuil a 2 et non 5 : mesure du 25/07/2026, un flux a mediane 15 ms et
+        # p95 60 ms (x4) ressortait « sain » avec un seuil a 5. Une queue de
+        # 60 ms sur une mediane de 15 ms est une vraie queue.
+        - "rtt_ratio_p95_p50 >= 2"
+    evidence:
+      - "RTT median {rtt_ms_p50:.1f} ms mais p95 {rtt_ms_p95:.1f} ms (x{rtt_ratio_p95_p50:.0f}) : la latence pique sans que la capture puisse dire pourquoi"
+    remediation: |
+      DEUX CAUSES produisent exactement cette signature et cette capture ne
+      permet PAS de les separer — d'ou le verdict ambigu plutot qu'un
+      diagnostic reseau qui aurait une chance sur deux d'etre faux :
+
+      1. GIGUE DU CHEMIN (files d'attente, lien partage, equipement en limite).
+      2. DELAYED ACK du recepteur : un timer de 40 ms (Linux) a 200 ms
+         (Windows) retarde des ACK purs. Le chemin est alors hors de cause.
+
+      POUR TRANCHER, dans l'ordre de cout :
+      1. Un `ping -i 0.2` de 60 s vers {server} pendant l'incident : si la
+         gigue apparait aussi en ICMP, c'est le chemin. Sinon c'est le timer.
+      2. Dans la capture, regarder si les RTT longs sont portes par des ACK
+         PURS (sans donnees) : signature du delayed ACK.
+      3. Comparer avec un autre flux vers une destination differente sur le
+         meme chemin : gigue partagee = chemin.
+
+      Ne PAS ouvrir de ticket operateur sur ce seul element.
+
   - id: clean
     verdict: RAS
     priority: 10
@@ -267,6 +375,19 @@ rules:
         - any:
             - "exchanges == 0"
             - "ttfb_ms_p95 < 500"
+        # La regle ne regardait AUCUNE mesure de latence : un flux a mediane
+        # 15 ms et p95 400 ms ressortait « transport sain » — un faux « tout va
+        # bien », la panne la plus couteuse pour un outil de diagnostic, car
+        # elle envoie l'admin chercher ailleurs (mesure du 25/07/2026).
+        # Les deux formes conjointes, jamais le ratio seul : sous la
+        # milliseconde un rapport n'a aucun sens (clean.pcap atteint x64 en
+        # etant parfaitement sain).
+        # Strictement complementaire de latency-tail-unexplained (meme seuils),
+        # sinon un flux tombe entre les deux regles et ressort « AMBIGU, pas
+        # assez d'elements » alors que la mesure disait quelque chose.
+        - any:
+            - "rtt_ms_p95 < 20"
+            - "rtt_ratio_p95_p50 < 2"
     evidence:
       - "Handshake {handshake_rtt_ms:.1f} ms, {pkts_total} pqts, pertes {retrans_rate:.2%}, TTFB p95 {ttfb_ms_p95:.0f} ms"
     remediation: |

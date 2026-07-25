@@ -246,6 +246,65 @@ class TestJointure:
     def test_sans_timeline_aucune_attribution(self, flux):
         assert attributions([flux], None) == {}
 
+    @pytest.mark.parametrize("forme_sysmon,forme_pcap", [
+        # Sysmon rend la forme etendue, pcap.py la forme compressee
+        # (socket.inet_ntop) : comparer les chaines brutes faisait echouer la
+        # jointure sur TOUT flux IPv6, sans aucun signal.
+        ("fe80:0:0:0:0:0:0:1", "fe80::1"),
+        ("2001:0DB8:0000:0000:0000:0000:0000:0042", "2001:db8::42"),
+        # Identifiant de zone d'une adresse lien-local.
+        ("fe80::1%12", "fe80::1"),
+        # Meme en IPv4, la casse ou les espaces ne doivent pas casser.
+        (" 10.0.0.5 ", "10.0.0.5"),
+    ])
+    def test_la_jointure_survit_aux_ecritures_differentes_d_une_adresse(
+            self, analyze, tmp_path, forme_sysmon, forme_pcap):
+        from netverdict.correlate import _side_of
+        from netverdict.timeline import ConnectionInfo
+
+        _sig, fv = analyze("syn_no_answer")
+        s = fv.signals
+        # On fabrique un flux dont le serveur est ecrit sous la forme pcap...
+        class _Sig:
+            client, cport = s.client, s.cport
+            server, sport = forme_pcap, s.sport
+        # ...et un evenement qui l'ecrit sous la forme Sysmon.
+        conn = ConnectionInfo(src_ip=s.client, src_port=s.cport,
+                              dst_ip=forme_sysmon, dst_port=s.sport)
+        assert _side_of(conn, _Sig) == "client"
+
+
+class TestHorodatage:
+    def test_l_evenement_est_date_a_la_CONNEXION_pas_a_l_ecriture(self, tmp_path):
+        """TimeCreated = moment ou le journal a ecrit ; UtcTime = moment de la
+        connexion. Pour joindre un pcap, seul le second a du sens : une
+        ecriture differee faisait sortir l'evenement de la fenetre du flux
+        SANS AUCUN SIGNAL."""
+        p = tmp_path / "differe.xml"
+        p.write_text(_EVENT_TPL.format(
+            provider="Microsoft-Windows-Sysmon", eid="3",
+            ts="1970-01-01T00:05:00.0000000Z",          # ecriture : +5 min
+            ts_human="1970-01-01T00:00:03.0000000Z",    # connexion : +3 s
+            pid=4212, image="C:\\curl.exe", proto="tcp", initiated="true",
+            sip="10.0.0.42", sport=51001, dip="10.0.0.5", dport=443),
+            encoding="utf-8")
+        evs, _ = evtx.parse(p)
+        assert evs[0].ts == 3.0, "le ts doit venir d'UtcTime, pas de TimeCreated"
+
+    def test_un_UtcTime_illisible_retombe_sur_TimeCreated(self, tmp_path):
+        """Degradation, pas abandon : un champ secondaire pourri ne doit pas
+        faire perdre l'evenement entier."""
+        p = tmp_path / "casse.xml"
+        p.write_text(_EVENT_TPL.format(
+            provider="Microsoft-Windows-Sysmon", eid="3",
+            ts="1970-01-01T00:05:00.0000000Z", ts_human="pas-une-date",
+            pid=1, image="C:\\x.exe", proto="tcp", initiated="true",
+            sip="10.0.0.1", sport=1, dip="10.0.0.2", dport=2),
+            encoding="utf-8")
+        evs, _ = evtx.parse(p)
+        assert evs[0].ts == 300.0
+        assert evs[0].connection is not None
+
 
 class TestSortieJson:
     def test_le_json_dit_que_l_attribution_est_retroactive(self, flux, colle,

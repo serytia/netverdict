@@ -176,6 +176,35 @@ class ProcessAttribution:
         return txt
 
 
+def _norm_ip(value: str) -> str:
+    """Forme canonique d'une adresse, pour comparer deux sources qui ne
+    l'ecrivent pas de la meme facon.
+
+    pcap.py passe par socket.inet_ntop, donc l'IPv6 en sort COMPRESSEE
+    ("fe80::1"). Sysmon rend la forme etendue ("fe80:0:0:0:0:0:0:1"), et une
+    adresse lien-local peut trainer un identifiant de zone ("fe80::1%12").
+    Comparer les chaines brutes faisait echouer la jointure sur TOUT flux
+    IPv6, sans aucun signal — la panne muette typique.
+
+    Une valeur non analysable revient telle quelle en minuscules : mieux vaut
+    une comparaison litterale qu'une exception sur une donnee douteuse.
+    """
+    import ipaddress
+
+    txt = (value or "").strip().lower()
+    if not txt:
+        return ""
+    txt = txt.split("%", 1)[0]            # retire l'identifiant de zone
+    try:
+        return ipaddress.ip_address(txt).compressed
+    except ValueError:
+        return txt
+
+
+def _same_endpoint(ip_a: str, port_a: int, ip_b: str, port_b: int) -> bool:
+    return port_a == port_b and _norm_ip(ip_a) == _norm_ip(ip_b)
+
+
 def _side_of(conn, sig) -> Optional[str]:
     """De quel cote du flux se trouve le process de cet evenement ?
 
@@ -184,11 +213,11 @@ def _side_of(conn, sig) -> Optional[str]:
     Une correspondance partielle ne compte pas — un port identique sur une
     autre adresse est un autre flux.
     """
-    if (conn.src_ip == sig.client and conn.src_port == sig.cport
-            and conn.dst_ip == sig.server and conn.dst_port == sig.sport):
+    if (_same_endpoint(conn.src_ip, conn.src_port, sig.client, sig.cport)
+            and _same_endpoint(conn.dst_ip, conn.dst_port, sig.server, sig.sport)):
         return "client"
-    if (conn.src_ip == sig.server and conn.src_port == sig.sport
-            and conn.dst_ip == sig.client and conn.dst_port == sig.cport):
+    if (_same_endpoint(conn.src_ip, conn.src_port, sig.server, sig.sport)
+            and _same_endpoint(conn.dst_ip, conn.dst_port, sig.client, sig.cport)):
         return "serveur"
     return None
 
