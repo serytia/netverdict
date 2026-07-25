@@ -1,9 +1,15 @@
 #!/usr/bin/env bash
 # Capture assistee netverdict (Linux) : trafic + etat hote, en un coup.
 #
-# tcpdump en-tetes seuls (-s 96 : IP+TCP+options, aucun payload donc aucun
-# secret dans le bundle) + snapshot au milieu de la fenetre : sockets avec
-# process (ss -tnp), charge CPU, memoire, pression disque.
+# tcpdump tronque (-s 96 : de quoi lire IP+TCP+options) + snapshot au milieu de
+# la fenetre : sockets avec process (ss -tnp), charge CPU, memoire, disque.
+#
+# ATTENTION : -s 96 n'est PAS une garantie d'absence de secret. tcpdump coupe a
+# 96 octets DEPUIS LE DEBUT DE LA TRAME, donc tout paquet plus court est capture
+# EN ENTIER, payload compris. Mesure du 25/07/2026 : "PASS hunter2", un login
+# FTP complet et un jeton JSON court passent INTACTS. La troncature elimine les
+# gros transferts, pas les secrets courts — et l'authentification en clair est
+# precisement courte. Traiter le bundle comme une donnee sensible.
 #
 # Usage : sudo ./capture.sh [-d 60] [-o outdir] [-i host_cible] [-p port]
 set -euo pipefail

@@ -10,9 +10,15 @@ Le pcap dit ce qui passe sur le fil ; le snapshot dit QUI tenait la socket
 et dans quel etat etait la machine — c'est le croisement des deux qui permet
 de trancher APP vs OS.
 
-Par defaut la capture est EN-TETES SEULS (128 octets/paquet) : suffisant pour
-l'analyse netverdict, fichiers legers, et aucun payload (donc aucun secret)
-dans le bundle. -FullPackets pour capturer les paquets entiers.
+Par defaut la capture est TRONQUEE a 128 octets/paquet : suffisant pour
+l'analyse netverdict et fichiers legers. -FullPackets pour les paquets entiers.
+
+ATTENTION : la troncature n'est PAS une garantie d'absence de secret. Elle coupe
+a 128 octets DEPUIS LE DEBUT DE LA TRAME, donc tout paquet plus court est
+capture EN ENTIER, payload compris. Mesure du 25/07/2026 : "PASS hunter2", un
+login FTP complet et un jeton JSON court passent INTACTS. La troncature elimine
+les gros transferts, pas les secrets courts — et l'authentification en clair est
+precisement courte. Traiter le bundle comme une donnee sensible.
 
 .EXAMPLE
 .\capture.ps1 -DurationSec 60 -TargetIP 10.0.0.5

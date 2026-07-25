@@ -56,7 +56,7 @@ from ..timeline import ConnectionInfo, SourceStats, TimelineEvent
 # installer le driver, le service et le canal de journal.
 _SYSMON_PROVIDER = "Microsoft-Windows-Sysmon"
 # Event ID 3 = NetworkConnect. DESACTIVE par defaut : il faut une config
-# (voir capture/sysmon-netverdict.xml, qui n'active que celui-la).
+# (voir netverdict/capture/sysmon-netverdict.xml, qui n'active que celui-la).
 _SYSMON_NETWORK_CONNECT = "3"
 
 # Namespace XML de tous les evenements Windows modernes (journal "Crimson").

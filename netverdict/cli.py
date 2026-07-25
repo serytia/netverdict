@@ -130,7 +130,12 @@ def cmd_capture(args: argparse.Namespace) -> int:
     sur Windows — natif, zero install ; tcpdump sur Linux) + snapshot de
     l'etat hote (sockets/PID/process, CPU, disque) au meme moment.
     """
-    here = Path(__file__).parent.parent / "capture"
+    # DANS le paquet, jamais a cote : `parent.parent / "capture"` visait la
+    # racine du depot, qui n'existe pas apres un `pip install` — le dossier
+    # cible devenait site-packages/capture et la sous-commande sortait en
+    # erreur 2 pour TOUT utilisateur installe, alors qu'elle est annoncee dans
+    # l'aide (verifie sur le wheel 0.3.0 le 25/07/2026).
+    here = Path(__file__).parent / "capture"
     if platform.system() == "Windows":
         script = here / "capture.ps1"
         cmd = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",

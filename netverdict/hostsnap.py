@@ -1,6 +1,6 @@
 """Jointure entre les flux et le snapshot d'etat hote pris a la capture.
 
-Le snapshot (produit par capture/capture.ps1 ou capture.sh) repond a la
+Le snapshot (produit par netverdict/capture/capture.ps1 ou capture.sh) repond a la
 question que le pcap seul ne peut pas trancher : QUI detient cette socket,
 et dans quel etat etait la machine. C'est lui qui transforme un verdict
 HOTE en verdict APP (process identifie, machine saine) ou OS (machine

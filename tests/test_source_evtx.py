@@ -17,7 +17,7 @@ NS = "http://schemas.microsoft.com/win/2004/08/events/event"
 
 
 def _event_xml(provider, event_id, level, system_time,
-               computer="LAPTOP-01", data=None):
+               computer="POSTE-LAB-01", data=None):
     """Construit le fragment XML d'un seul <Event>, au format wevtutil
     (namespace declare directement sur l'element Event)."""
     time_part = f"<TimeCreated SystemTime='{system_time}' />" if system_time else ""
@@ -83,7 +83,7 @@ def _check_full_fixture(events, stats):
 
     assert all(e.source == "evtx" for e in events)
     assert all(e.tz_known for e in events)
-    assert all(e.host == "LAPTOP-01" for e in events)
+    assert all(e.host == "POSTE-LAB-01" for e in events)
     assert all(isinstance(e.ident, str) for e in events)
 
     e105 = by_ident["105"]

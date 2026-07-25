@@ -96,10 +96,28 @@ netverdict rules
 
 Code retour : `0` = rien d'anormal, `1` = au moins un verdict, `2` = erreur.
 
-La capture assistee est **en-tetes seuls par defaut** (128 octets/paquet) :
-suffisant pour l'analyse, leger, et aucun payload — donc aucun credential —
-dans le bundle. L'option `--explain` n'envoie jamais le pcap : uniquement le
-rapport JSON (signaux et verdicts).
+La capture assistee est **tronquee par defaut** (128 octets/paquet sous Windows,
+96 sous Linux) : suffisant pour l'analyse et leger.
+
+**Ce n'est PAS une garantie d'absence de credential**, contrairement a ce que
+ce README affirmait avant le 25/07/2026. La troncature coupe a N octets *depuis
+le debut de la trame* — un paquet plus court que N est donc capture EN ENTIER,
+payload compris. Mesure :
+
+| Payload | `-s 96` | 128 o |
+|---|---|---|
+| `PASS hunter2` (POP3/FTP en clair) | **complet** | **complet** |
+| `USER admin` + `PASS ...` | **complet** | **complet** |
+| `{"token":"eyJhbGciOi..."}` | **complet** | **complet** |
+| En-tete `Authorization: Basic ...` (51 o) | 42/51 o | **complet** |
+
+Autrement dit : la troncature elimine les gros transferts, pas les secrets
+courts — et les protocoles d'authentification en clair sont precisement courts.
+Traiter un bundle comme une donnee sensible : le relire avant de le transmettre,
+et preferer `--full-packets` uniquement quand c'est necessaire et assume.
+
+L'option `--explain` n'envoie jamais le pcap : uniquement le rapport JSON
+(signaux et verdicts).
 
 ## Comment ca marche
 
@@ -170,9 +188,18 @@ Ajouter ses propres regles : `netverdict analyze ... --rules mes_regles.yaml`
   pour repondre a "qu'est-ce qui a change dans l'infra juste avant ?".
 - v1.2 (fait) : `--syslog-tz`, correlation changement->verdict, jointure
   process<->flux retroactive via Sysmon Event ID 3. **Reste a valider sur un
-  vrai enregistrement Sysmon** (`sysmon -i` demande une console admin) : les
-  noms de champs viennent du schema du binaire, la forme du XML est celle des
-  evenements Windows standards deja parses par sources/evtx.py.
+  vrai enregistrement Sysmon** : les noms de champs viennent du schema du
+  binaire, la forme du XML est celle des evenements Windows standards deja
+  parses par sources/evtx.py. Pour activer la source (console admin) :
+
+  ```powershell
+  sysmon -i -accepteula <chemin>\netverdict\capture\sysmon-netverdict.xml
+  ```
+
+  Cette configuration n'active QUE l'Event ID 3 (NetworkConnect), desactive par
+  defaut dans le Sysmon livre avec Windows 11 24H2. Les 21 autres types
+  d'evenements y sont en `onmatch="include"` sans aucune regle, ce qui les
+  laisse eteints — on n'allume pas un journal complet pour une jointure.
 - v2 : capture pilotee des deux cotes (client ET serveur) et comparaison.
 
 ## Licence

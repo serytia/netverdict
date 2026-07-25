@@ -33,7 +33,7 @@ _EVENT_TPL = """<Event xmlns="http://schemas.microsoft.com/win/2004/08/events/ev
     <EventID>{eid}</EventID>
     <Level>4</Level>
     <TimeCreated SystemTime="{ts}"/>
-    <Computer>POSTE-01</Computer>
+    <Computer>POSTE-LAB-01</Computer>
   </System>
   <EventData>
     <Data Name="RuleName">-</Data>
@@ -41,12 +41,12 @@ _EVENT_TPL = """<Event xmlns="http://schemas.microsoft.com/win/2004/08/events/ev
     <Data Name="ProcessGuid">{{01234567-89ab-cdef-0123-456789abcdef}}</Data>
     <Data Name="ProcessId">{pid}</Data>
     <Data Name="Image">{image}</Data>
-    <Data Name="User">POSTE-01\\user01</Data>
+    <Data Name="User">POSTE-LAB-01\\utilisateur</Data>
     <Data Name="Protocol">{proto}</Data>
     <Data Name="Initiated">{initiated}</Data>
     <Data Name="SourceIsIpv6">false</Data>
     <Data Name="SourceIp">{sip}</Data>
-    <Data Name="SourceHostname">poste-01</Data>
+    <Data Name="SourceHostname">poste-lab-01</Data>
     <Data Name="SourcePort">{sport}</Data>
     <Data Name="SourcePortName">-</Data>
     <Data Name="DestinationIsIpv6">false</Data>

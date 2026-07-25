@@ -35,7 +35,12 @@ netverdict = "netverdict.cli:main"
 include = ["netverdict*"]
 
 [tool.setuptools.package-data]
-netverdict = ["rules/*.yaml"]
+# capture/ est du contenu LIVRE, pas de l'outillage de depot : la sous-commande
+# `netverdict capture` l'execute. Son absence du wheel cassait la commande pour
+# tout utilisateur installe alors qu'elle est annoncee dans l'aide. Le dossier
+# vit sous netverdict/ pour cette raison — setuptools ne sait pas embarquer un
+# repertoire situe hors du paquet.
+netverdict = ["rules/*.yaml", "capture/*.ps1", "capture/*.sh", "capture/*.xml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
