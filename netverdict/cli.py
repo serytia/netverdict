@@ -60,7 +60,7 @@ def cmd_analyze(args: argparse.Namespace) -> int:
             return 2
 
     timeline = None
-    if args.events or args.syslog:
+    if args.events or args.syslog or args.audit:
         from .timeline import Timeline
         timeline = Timeline()
         # OSError attrape aussi : un chemin --events/--syslog invalide doit
@@ -99,6 +99,14 @@ def cmd_analyze(args: argparse.Namespace) -> int:
                 print(f"--syslog {path}: {e}", file=sys.stderr)
                 return 2
             timeline.add_source(f"syslog:{Path(path).name}", evs, st)
+        for path in args.audit:
+            from .sources import auditd
+            try:
+                evs, st = auditd.parse(path)
+            except (ValueError, OSError) as e:
+                print(f"--audit {path}: {e}", file=sys.stderr)
+                return 2
+            timeline.add_source(f"audit:{Path(path).name}", evs, st)
         # Fenetre : les changements des 15 min qui precedent la capture ;
         # rien apres sa fin ne peut expliquer ce qu'elle contient.
         timeline = timeline.window(cap.t_first, cap.t_last)
@@ -188,6 +196,10 @@ def main(argv: list[str] | None = None) -> int:
     pa.add_argument("--syslog", action="append", default=[],
                     help="Fichier syslog plat (cumulable) — alimente la "
                          "timeline des changements")
+    pa.add_argument("--audit", action="append", default=[],
+                    help="Journal auditd Linux (/var/log/audit/audit.log, "
+                         "cumulable) — retrouve le process d'un flux meme "
+                         "deja mort (parite Linux de Sysmon)")
     pa.add_argument("--syslog-tz", metavar="FUSEAU",
                     help="Fuseau des lignes RFC3164 (sans fuseau dans le "
                          "format) : UTC, un decalage fixe (+02:00) ou un nom "

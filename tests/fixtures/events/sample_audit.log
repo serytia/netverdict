@@ -1,0 +1,26 @@
+type=CONFIG_CHANGE msg=audit(1785018139.000:11998): op=add_rule key="netverdict_connect" list=4 res=1
+type=DAEMON_START msg=audit(1785018139.500:11999): op=start ver=3.1.2 format=raw kernel=6.1.0-25-generic auid=4294967295 pid=850 uid=0 ses=4294967295 res=success
+
+type=PROCTITLE msg=audit(1785018160.202:12346): proctitle=776765740068747470733A2F2F31302E322E302E323A343433
+type=SYSCALL msg=audit(1785018160.202:12346): arch=c000003e syscall=42 success=yes exit=0 a0=3 a1=7ffd8a9e1200 a2=10 a3=0 items=0 ppid=1181 pid=11901 auid=1000 uid=1000 gid=1000 euid=1000 suid=1000 fsuid=1000 egid=1000 sgid=1000 fsgid=1000 tty=pts0 ses=3 comm="wget" exe="/usr/bin/wget" key="netverdict_connect"
+type=PROCTITLE msg=audit(1785018161.000:99999): proctitle=756E72656C6174656400
+type=SOCKADDR msg=audit(1785018160.202:12346): saddr=020001BB0A020002
+type=EOE msg=audit(1785018160.202:12346):
+type=PROCTITLE msg=audit(1785018170.777:12347): proctitle=737368002D700038343433
+type=SYSCALL msg=audit(1785018170.777:12347): arch=c000003e syscall=42 success=yes exit=0 a0=3 a1=7ffd8a9e1300 a2=1c a3=0 items=0 ppid=1182 pid=11902 auid=1000 uid=1000 gid=1000 euid=1000 suid=1000 fsuid=1000 egid=1000 sgid=1000 fsgid=1000 tty=pts0 ses=3 comm="ssh" exe="/usr/bin/ssh" key="netverdict_connect"
+type=SOCKADDR msg=audit(1785018170.777:12347): saddr=0A0020FB0000000020010DB8000000000000000000000042
+type=EOE msg=audit(1785018170.777:12347):
+type=PROCTITLE msg=audit(1785018155.501:12345): proctitle=6375726C002D7300687474703A2F2F3137322E31362E302E31303A3830
+type=SYSCALL msg=audit(1785018155.501:12345): arch=c000003e syscall=42 success=yes exit=0 a0=3 a1=7ffd8a9e1120 a2=10 a3=0 items=0 ppid=1180 pid=11900 auid=1000 uid=1000 gid=1000 euid=1000 suid=1000 fsuid=1000 egid=1000 sgid=1000 fsgid=1000 tty=pts0 ses=3 comm="curl" exe="/usr/bin/curl" key="netverdict_connect"
+type=SOCKADDR msg=audit(1785018155.501:12345): saddr=02000050AC10000A0000000000000000
+type=EOE msg=audit(1785018155.501:12345):
+type=SYSCALL msg=audit(1785018180.000:12348): arch=c000003e syscall=42 success=yes exit=0 a0=3 a1=7ffd8a9e1400 a2=6e a3=0 items=0 ppid=1183 pid=11903 auid=1000 uid=1000 gid=1000 euid=1000 suid=1000 fsuid=1000 egid=1000 sgid=1000 fsgid=1000 tty=(none) ses=4294967295 comm="dockerd" exe="/usr/bin/dockerd" key="netverdict_connect"
+type=SOCKADDR msg=audit(1785018180.000:12348): saddr=01002F7661722F72756E2F646F636B65722E736F636B0000
+type=EOE msg=audit(1785018180.000:12348):
+type=SYSCALL msg=audit(1785018190.300:12349): arch=c000003e syscall=42 success=no exit=-111 a0=3 a1=7ffd8a9e1500 a2=10 a3=0 items=0 ppid=1184 pid=11904 auid=1000 uid=1000 gid=1000 euid=1000 suid=1000 fsuid=1000 egid=1000 sgid=1000 fsgid=1000 tty=pts0 ses=3 comm="nc" exe="/usr/bin/nc" key="netverdict_connect"
+type=SOCKADDR msg=audit(1785018190.300:12349): saddr=0200270FCB007109
+type=EOE msg=audit(1785018190.300:12349):
+type=SYSCALL msg=audit(1785018200.400:12350): arch=c000003e syscall=42 success=yes exit=0 a0=3 a1=7ffd8a9e1600 a2=10 a3=0 items=0 ppid=1185 pid=11905 auid=1000 uid=1000 gid=1000 euid=1000 suid=1000 fsuid=1000 egid=1000 sgid=1000 fsgid=1000 tty=pts0 ses=3 comm="python3" exe="/usr/bin/python3.11" key="netverdict_connect"
+type=EOE msg=audit(1785018200.400:12350):
+type=SYSCALL msg=audit(1785018
+#### CORRUPTED - disk full during write ####

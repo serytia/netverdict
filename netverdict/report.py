@@ -304,6 +304,10 @@ def to_json(cap: Capture, verdicts: list[FlowVerdict],
                 "retroactive": True,
                 "side": attr.side,
                 "candidates": attr.candidates,
+                # False = rapproche sur la destination seule (auditd) : un
+                # consommateur machine doit pouvoir ponderer cette attribution
+                # plus faible sans avoir a lire la phrase du rapport.
+                "exact": attr.exact,
                 "pid": c.pid,
                 "image": c.image,
                 "user": c.user,

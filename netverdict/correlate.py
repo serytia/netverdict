@@ -159,6 +159,10 @@ class ProcessAttribution:
     # reutilisation de port sur une capture longue : on affiche le plus proche
     # du debut du flux, mais l'admin doit savoir qu'il y avait ambiguite.
     candidates: int = 1
+    # True quand les DEUX extremites ont ete confrontees (Sysmon, WFP). False
+    # quand la source ne donne que la destination (auditd connect()) : la
+    # correspondance est alors plus faible et le rapport doit l'annoncer.
+    exact: bool = True
 
     @property
     def connection(self):
@@ -170,6 +174,10 @@ class ProcessAttribution:
         txt = f"{c.process_label()} cote {self.side}"
         if c.user:
             txt += f", utilisateur {c.user}"
+        if not self.exact:
+            txt += (" — rapproche par la DESTINATION seule (le journal ne "
+                    "donne pas le port source) : un autre process contactant "
+                    "le meme service au meme moment serait indiscernable")
         if self.candidates > 1:
             txt += (f" — {self.candidates} connexions correspondaient "
                     f"(port reutilise ?), la plus proche du debut du flux")
@@ -205,20 +213,39 @@ def _same_endpoint(ip_a: str, port_a: int, ip_b: str, port_b: int) -> bool:
     return port_a == port_b and _norm_ip(ip_a) == _norm_ip(ip_b)
 
 
-def _side_of(conn, sig) -> Optional[str]:
+def _side_of(conn, sig) -> Optional[tuple[str, bool]]:
     """De quel cote du flux se trouve le process de cet evenement ?
 
-    On teste les DEUX sens du quadruplet : l'evenement peut avoir ete emis par
-    la machine cliente (elle initie) ou par la machine serveur (elle recoit).
-    Une correspondance partielle ne compte pas — un port identique sur une
-    autre adresse est un autre flux.
+    Retourne (cote, exact) ou None si l'evenement ne concerne pas ce flux.
+    `exact` = les DEUX extremites ont ete confrontees.
+
+    Correspondance EXACTE (Sysmon EID3, WFP 5156) : on teste les deux sens du
+    quadruplet, l'evenement pouvant venir de la machine cliente (elle initie)
+    ou serveur (elle recoit). Un port identique sur une autre adresse est un
+    autre flux : la correspondance doit porter sur les quatre champs.
+
+    Correspondance PARTIELLE (auditd) : un record connect() ne contient QUE la
+    destination — le noyau n'a pas encore attribue le port source au moment de
+    l'appel. Exiger les deux extremites rendrait la jointure Linux
+    silencieusement inerte (verifie : _side_of retournait None sur 100 % des
+    events auditd). On accepte donc la destination seule, et l'appelant marque
+    l'attribution comme non exacte : plusieurs process contactant le meme
+    serveur:port dans la fenetre sont alors indiscernables, et le rapport doit
+    le dire plutot que de designer un coupable avec un aplomb qu'il n'a pas.
     """
     if (_same_endpoint(conn.src_ip, conn.src_port, sig.client, sig.cport)
             and _same_endpoint(conn.dst_ip, conn.dst_port, sig.server, sig.sport)):
-        return "client"
+        return ("client", True)
     if (_same_endpoint(conn.src_ip, conn.src_port, sig.server, sig.sport)
             and _same_endpoint(conn.dst_ip, conn.dst_port, sig.client, sig.cport)):
-        return "serveur"
+        return ("serveur", True)
+    # Source inconnue : uniquement le cas connect(), donc le process observe
+    # est forcement le CLIENT du flux. Un flux ENTRANT (accept() cote serveur)
+    # n'a pas de connect() correspondant dans le journal local, il ne peut donc
+    # pas produire de faux positif ici.
+    if not conn.src_ip and not conn.src_port:
+        if _same_endpoint(conn.dst_ip, conn.dst_port, sig.server, sig.sport):
+            return ("client", False)
     return None
 
 
@@ -232,7 +259,7 @@ def attribution_for(fv: FlowVerdict, timeline: Timeline,
     """
     sig = fv.signals
     t_end = sig.t_first + max(0.0, sig.duration_s)
-    trouves: list[tuple[float, TimelineEvent, str]] = []
+    trouves: list[tuple[float, TimelineEvent, str, bool]] = []
 
     for e in timeline.events:
         c = e.connection
@@ -243,16 +270,26 @@ def attribution_for(fv: FlowVerdict, timeline: Timeline,
             continue
         if not (sig.t_first - tolerance_s <= e.ts <= t_end + tolerance_s):
             continue
-        side = _side_of(c, sig)
-        if side is None:
+        match = _side_of(c, sig)
+        if match is None:
             continue
-        trouves.append((abs(e.ts - sig.t_first), e, side))
+        side, exact = match
+        trouves.append((abs(e.ts - sig.t_first), e, side, exact))
 
     if not trouves:
         return None
-    trouves.sort(key=lambda t: t[0])
-    _ecart, event, side = trouves[0]
-    return ProcessAttribution(event=event, side=side, candidates=len(trouves))
+    # Une correspondance EXACTE prime toujours sur une partielle, quelle que
+    # soit la proximite temporelle : si Sysmon et auditd alimentent la meme
+    # analyse, la source la plus precise gagne. A qualite egale, le plus
+    # proche du debut du flux.
+    trouves.sort(key=lambda t: (not t[3], t[0]))
+    _ecart, event, side, exact = trouves[0]
+    # `candidates` ne compte que les correspondances de MEME qualite : melanger
+    # les deux gonflerait l'avertissement d'ambiguite avec des events qu'on
+    # n'aurait de toute facon pas retenus.
+    meme_qualite = sum(1 for t in trouves if t[3] == exact)
+    return ProcessAttribution(event=event, side=side,
+                              candidates=meme_qualite, exact=exact)
 
 
 def attributions(verdicts: list[FlowVerdict],

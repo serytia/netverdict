@@ -271,7 +271,8 @@ class TestJointure:
         # ...et un evenement qui l'ecrit sous la forme Sysmon.
         conn = ConnectionInfo(src_ip=s.client, src_port=s.cport,
                               dst_ip=forme_sysmon, dst_port=s.sport)
-        assert _side_of(conn, _Sig) == "client"
+        # (cote, exact) : les deux extremites sont connues ici, donc exact.
+        assert _side_of(conn, _Sig) == ("client", True)
 
 
 class TestHorodatage:
