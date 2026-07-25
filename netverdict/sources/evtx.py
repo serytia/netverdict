@@ -549,7 +549,17 @@ def parse(path: str | Path) -> tuple[list[TimelineEvent], SourceStats]:
     # critere est semantique (aucun event ne porte de ConnectionInfo), pas
     # le numero 3 : il couvrira les variantes futures (WFP 5156). Le prefixe
     # du message est NOTRE format (f"{provider}: ..."), invariant teste.
-    if events and not any(e.connection is not None for e in events):
+    # Zero evenement lu : le cas peut etre legitime (export filtre vide), mais
+    # il est INDISCERNABLE d'un fichier illisible tant qu'on ne le dit pas.
+    # Constate en CI le 26/07 : un .evtx binaire tronque traverse python-evtx
+    # sans lever et rendait ([], stats) — l'admin en concluait « rien ne s'est
+    # passe » alors que sa source n'avait jamais ete lue.
+    if not events:
+        stats.note = (
+            "aucun evenement lu dans ce fichier. S'il ne devait pas etre vide : "
+            "verifier l'export (canal, filtre de date, droits) — pour un .evtx "
+            "binaire, reexporter en XML avec  wevtutil qe <canal> /f:xml > events.xml")
+    elif not any(e.connection is not None for e in events):
         if any(e.message.startswith(_SYSMON_PROVIDER) for e in events):
             stats.note = (
                 "events Sysmon lus mais AUCUN NetworkConnect (EID3) : "

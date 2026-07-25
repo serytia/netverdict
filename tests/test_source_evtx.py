@@ -197,9 +197,17 @@ def test_evtx_binary_without_python_evtx_raises_actionable_error(tmp_path):
                     reason="python-evtx non installe : rien a tester ici")
 def test_evtx_binary_with_python_evtx_present_does_not_raise_import_error(tmp_path):
     """Si python-evtx EST installe, un faux .evtx (mauvais contenu apres la
-    signature) doit echouer proprement (ValueError), pas planter avec une
-    exception non geree venant de la librairie."""
+    signature) ne doit ni lever d'ImportError ni laisser fuir une exception
+    de la librairie.
+
+    ATTENTE CORRIGEE (CI du 26/07, premier passage reel de cette branche) :
+    python-evtx traverse ce fichier SANS lever — il rend simplement zero
+    record. Exiger un ValueError decrivait donc un comportement imaginaire.
+    Et lever serait faux de toute facon : un canal legitimement vide existe.
+    Ce qui compte, c'est que le silence soit ROMPU — d'ou la note."""
     p = tmp_path / "fake.evtx"
     p.write_bytes(b"ElfFile\x00" + b"\x00" * 64)
-    with pytest.raises(ValueError):
-        parse(p)
+    events, stats = parse(p)          # ne doit pas lever
+    assert events == []
+    assert "aucun evenement lu" in stats.note
+    assert "wevtutil" in stats.note   # la sortie de secours est donnee

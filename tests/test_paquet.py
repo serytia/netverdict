@@ -77,6 +77,11 @@ def test_cmd_capture_ne_cherche_plus_a_cote_du_paquet(monkeypatch, capsys):
         return 0
 
     monkeypatch.setattr("netverdict.cli.subprocess.call", faux_call)
+    # Ce test porte sur la RESOLUTION DU CHEMIN, pas sur le systeme : on force
+    # un OS supporte pour qu'il verifie la meme propriete partout. Sans ca, il
+    # tombait sur macOS depuis l'ajout du garde-fou d'OS (CI du 26/07), en
+    # signalant un faux probleme de chemin.
+    monkeypatch.setattr("netverdict.cli.platform.system", lambda: "Linux")
 
     class Args:
         duration = None
