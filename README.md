@@ -40,9 +40,14 @@ Wireshark — encode dans un moteur de regles deterministe :
 
 ## Installation
 
+Pas encore publie sur PyPI — installation depuis les sources :
+
 ```
-pip install netverdict            # analyse : aucune dependance systeme
-pip install netverdict[explain]   # + synthese narrative via l'API Claude (optionnel)
+git clone https://github.com/serytia/netverdict
+cd netverdict
+pip install .                     # analyse : aucune dependance systeme
+pip install ".[explain]"          # + synthese narrative via l'API Claude (optionnel)
+pip install ".[evtx]"             # + lecture directe des .evtx binaires
 ```
 
 100 % Python (dpkt). Pas besoin de Wireshark/tshark, ni sur le poste

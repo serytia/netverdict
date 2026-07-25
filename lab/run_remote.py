@@ -14,6 +14,7 @@ Necessite paramiko (dependance de dev, pas de l'outil).
 from __future__ import annotations
 
 import argparse
+import os
 import shlex
 import sys
 from pathlib import Path
@@ -44,10 +45,18 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=2224)
-    ap.add_argument("--user", default="netlab")
-    ap.add_argument("--password", default="***RETIRE-DE-L-HISTORIQUE***")
+    ap.add_argument("--user", default=os.environ.get("NETLAB_USER", "netlab"))
+    # Pas de mot de passe en dur : ce depot est public, et un identifiant
+    # ecrit dans un projet de securite defensive se remarque. Il vient de
+    # l'environnement, ou du drapeau explicite.
+    #   Windows : $env:NETLAB_PASSWORD = "..."      Linux : export NETLAB_PASSWORD=...
+    ap.add_argument("--password", default=os.environ.get("NETLAB_PASSWORD"),
+                    help="mot de passe SSH du lab (defaut : $NETLAB_PASSWORD)")
     ap.add_argument("--out", default=str(REPO / "tests" / "fixtures" / "lab"))
     args = ap.parse_args()
+    if not args.password:
+        ap.error("mot de passe absent : definir NETLAB_PASSWORD dans "
+                 "l'environnement, ou passer --password")
 
     cli = paramiko.SSHClient()
     # Lab local jetable derriere un NAT VirtualBox : TOFU acceptable ici,

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "netverdict"
-version = "0.2.0"
+version = "0.3.0"
 description = "Triage d'incident reseau/app/OS : analyse une capture et rend un verdict argumente avec preuves"
 readme = "README.md"
 requires-python = ">=3.11"
