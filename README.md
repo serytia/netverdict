@@ -1,5 +1,10 @@
 # netverdict
 
+[![PyPI](https://img.shields.io/pypi/v/netverdict)](https://pypi.org/project/netverdict/)
+[![Python](https://img.shields.io/pypi/pyversions/netverdict)](https://pypi.org/project/netverdict/)
+[![CI](https://github.com/serytia/netverdict/actions/workflows/ci.yml/badge.svg)](https://github.com/serytia/netverdict/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-GPLv2-blue)](LICENSE)
+
 **La capture reseau dit si le probleme vient du reseau, de l'application ou du
 systeme — avec les preuves, et une piste de correction.**
 
@@ -40,14 +45,19 @@ Wireshark — encode dans un moteur de regles deterministe :
 
 ## Installation
 
-Pas encore publie sur PyPI — installation depuis les sources :
+```
+pip install netverdict                # analyse : aucune dependance systeme
+pip install "netverdict[explain]"     # + synthese narrative via l'API Claude (optionnel)
+pip install "netverdict[evtx]"        # + lecture directe des .evtx binaires
+```
+
+Depuis les sources (pour contribuer) :
 
 ```
 git clone https://github.com/serytia/netverdict
 cd netverdict
-pip install .                     # analyse : aucune dependance systeme
-pip install ".[explain]"          # + synthese narrative via l'API Claude (optionnel)
-pip install ".[evtx]"             # + lecture directe des .evtx binaires
+pip install -e ".[dev]"
+pytest
 ```
 
 100 % Python (dpkt). Pas besoin de Wireshark/tshark, ni sur le poste
