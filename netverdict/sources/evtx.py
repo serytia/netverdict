@@ -59,6 +59,25 @@ _SYSMON_PROVIDER = "Microsoft-Windows-Sysmon"
 # (voir netverdict/capture/sysmon-netverdict.xml, qui n'active que celui-la).
 _SYSMON_NETWORK_CONNECT = "3"
 
+# WFP (Windows Filtering Platform) : audit NATIF de Windows, zero
+# installation -- la ou Sysmon exige d'installer un agent (`sysmon -i`),
+# WFP s'active par `auditpol` ou GPO sur n'importe quel Windows sans rien
+# deployer. Meme argument que Sysmon EID 3 pour la jointure process<->flux,
+# sans le prealable d'installation.
+#
+# Le canal Security n'a QU'UN SEUL provider pour tout son audit (logons,
+# privileges, WFP...) : (Provider, EventID) reste la bonne cle, l'EventID
+# fait tout le travail de discrimination ici.
+_WFP_PROVIDER = "Microsoft-Windows-Security-Auditing"
+# EID 5156 : "The Windows Filtering Platform has permitted a connection" --
+# LE cas utile courant, l'equivalent WFP de Sysmon EID 3.
+_WFP_EID_ALLOW = "5156"
+# EID 5157 : "The Windows Filtering Platform has blocked a connection" --
+# aussi precieux que 5156 pour cet outil : un flux qui n'aboutit pas (SYN
+# sans reponse dans le pcap) trouve ici son explication ET son process, la
+# ou Sysmon (qui n'observe QUE les connexions etablies) resterait muet.
+_WFP_EID_BLOCK = "5157"
+
 # Namespace XML de tous les evenements Windows modernes (journal "Crimson").
 _EVENT_NS = "http://schemas.microsoft.com/win/2004/08/events/event"
 
@@ -167,6 +186,21 @@ _EVENT_TABLE: dict[tuple[str, str], tuple[str, int, str]] = {
     # ailleurs : le champ `connection`, qui porte la jointure process<->flux.
     (_SYSMON_PROVIDER, _SYSMON_NETWORK_CONNECT):
         ("info", 0, "connexion reseau"),
+
+    # WFP : connexion PERMISE par une regle de filtrage, avec le process qui
+    # la detient. Meme raisonnement que Sysmon EID 3 ci-dessus : "info"/0 A
+    # DESSEIN, c'est une OBSERVATION -- la jointure vit dans `connection`,
+    # pas dans la categorie (cf. commentaire Sysmon et TimelineEvent.connection
+    # dans timeline.py).
+    (_WFP_PROVIDER, _WFP_EID_ALLOW):
+        ("info", 0, "connexion WFP permise"),
+
+    # WFP : connexion BLOQUEE par une regle de filtrage. Severite 1 (un
+    # signal a regarder), pas une "error" : c'est le pare-feu qui fait son
+    # travail, pas une panne de l'hote. Categorie "info" pour la meme raison
+    # que ci-dessus -- le message le dit explicitement (voir plus bas).
+    (_WFP_PROVIDER, _WFP_EID_BLOCK):
+        ("info", 1, "connexion WFP bloquee"),
 
     # Connexion a un profil reseau : l'hote vient de rejoindre un reseau
     # (cable branche, wifi associe, VPN monte).
@@ -372,6 +406,70 @@ def _sysmon_connection(fields: dict[str, str]) -> Optional[ConnectionInfo]:
     )
 
 
+def _wfp_connection(fields: dict[str, str]) -> Optional[ConnectionInfo]:
+    """Event ID 5156/5157 (WFP, canal Security) -> ConnectionInfo.
+
+    Noms de champs EventData exacts du provider
+    Microsoft-Windows-Security-Auditing : ProcessID, Application, Direction,
+    SourceAddress, SourcePort, DestAddress, DestPort, Protocol.
+
+    Avantage sur Sysmon ET sur auditd : WFP donne les DEUX extremites (src
+    ET dst), la jointure via correlate._side_of sera donc EXACTE
+    (ProcessAttribution.exact=True) -- exactement ce qu'auditd ne peut pas
+    offrir puisque connect() ne journalise jamais le port source.
+
+    Un quadruplet incomplet renvoie None : meme regle que Sysmon, une
+    jointure sur un champ manquant rattacherait le flux au mauvais process,
+    ce qui est pire que pas de jointure du tout.
+    """
+    src_ip = fields.get("SourceAddress", "")
+    dst_ip = fields.get("DestAddress", "")
+    src_port = _as_int(fields.get("SourcePort", ""))
+    dst_port = _as_int(fields.get("DestPort", ""))
+    if not src_ip or not dst_ip or src_port is None or dst_port is None:
+        return None
+
+    protocol_raw = fields.get("Protocol", "").strip()
+    if protocol_raw == "6":
+        protocol = "tcp"
+    elif protocol_raw == "17":
+        protocol = "udp"
+    else:
+        # Protocole ni TCP ni UDP (1=ICMP, etc.), ou absent : on GARDE la
+        # valeur numerique telle quelle plutot que de forcer "tcp" par
+        # defaut. correlate.attribution_for() ignore tout ce qui n'est pas
+        # exactement "tcp" -- un protocole inconnu doit rester distinct de
+        # "tcp" pour ne pas fausser une jointure qui ne le concerne pas.
+        protocol = protocol_raw
+
+    direction = fields.get("Direction", "").strip()
+    initiated: Optional[bool]
+    if direction == "%%14593":       # Outbound
+        initiated = True
+    elif direction == "%%14592":     # Inbound
+        initiated = False
+    else:
+        initiated = None
+
+    return ConnectionInfo(
+        src_ip=src_ip,
+        src_port=src_port,
+        dst_ip=dst_ip,
+        dst_port=dst_port,
+        protocol=protocol,
+        pid=_as_int(fields.get("ProcessID", "")),
+        # Chemin NT (\device\harddiskvolumeN\...) : impossible a resoudre de
+        # facon fiable vers une lettre de lecteur sans API Windows, et
+        # l'analyse peut se faire hors ligne sur une autre machine -- on le
+        # garde tel quel. ConnectionInfo.process_label() n'a besoin que du
+        # dernier segment de chemin, qui reste "curl.exe" quel que soit le
+        # separateur : verifie, aucune degradation cote rapport.
+        image=fields.get("Application", ""),
+        user=fields.get("SubjectUserName", ""),
+        initiated=initiated,
+    )
+
+
 def _parse_event_element(ev: ET.Element) -> Optional[TimelineEvent]:
     """Convertit UN element <Event> (namespace ou non) en TimelineEvent.
 
@@ -419,13 +517,17 @@ def _parse_event_element(ev: ET.Element) -> Optional[TimelineEvent]:
         category, severity = _LEVEL_DEFAULT.get(level, ("info", 0))
         desc = f"EventID {ident}" if ident else "evenement sans EventID"
 
-    # Sysmon Event 3 : on extrait la jointure process<->connexion, et on
-    # fabrique un resume lisible plutot que le "Name=valeur" generique.
+    # Sysmon Event 3 ou WFP 5156/5157 : on extrait la jointure
+    # process<->connexion, et on fabrique un resume lisible plutot que le
+    # "Name=valeur" generique.
     connection: Optional[ConnectionInfo] = None
     champs: dict[str, str] = {}
     if provider == _SYSMON_PROVIDER and ident == _SYSMON_NETWORK_CONNECT:
         champs = _eventdata_map(ev, p)
         connection = _sysmon_connection(champs)
+    elif provider == _WFP_PROVIDER and ident in (_WFP_EID_ALLOW, _WFP_EID_BLOCK):
+        champs = _eventdata_map(ev, p)
+        connection = _wfp_connection(champs)
 
     if connection is not None:
         # HORODATAGE : TimeCreated est le moment ou le journal a ECRIT le
@@ -547,8 +649,10 @@ def parse(path: str | Path) -> tuple[list[TimelineEvent], SourceStats]:
     # tres bien (ProcessCreate...), la jointure process<->flux ne matche
     # jamais, et RIEN ne le dit — une capacite silencieusement inerte. Le
     # critere est semantique (aucun event ne porte de ConnectionInfo), pas
-    # le numero 3 : il couvrira les variantes futures (WFP 5156). Le prefixe
-    # du message est NOTRE format (f"{provider}: ..."), invariant teste.
+    # le numero 3 : il couvre aussi WFP (5156/5157) ci-dessous, meme
+    # symptome, meme remede (documenter la commande d'activation). Le
+    # prefixe du message est NOTRE format (f"{provider}: ..."), invariant
+    # teste.
     # Zero evenement lu : le cas peut etre legitime (export filtre vide), mais
     # il est INDISCERNABLE d'un fichier illisible tant qu'on ne le dit pas.
     # Constate en CI le 26/07 : un .evtx binaire tronque traverse python-evtx
@@ -560,12 +664,30 @@ def parse(path: str | Path) -> tuple[list[TimelineEvent], SourceStats]:
             "verifier l'export (canal, filtre de date, droits) — pour un .evtx "
             "binaire, reexporter en XML avec  wevtutil qe <canal> /f:xml > events.xml")
     elif not any(e.connection is not None for e in events):
+        # Deux sources possibles de connexion, deux verifications
+        # INDEPENDANTES (sur le prefixe reel du message, pas sur une
+        # supposition) : un fichier Sysmon sans EID3 ne doit jamais produire
+        # la note WFP, et reciproquement -- chaque source a sa propre
+        # commande d'activation, melanger les deux induirait l'admin en erreur.
+        notes: list[str] = []
         if any(e.message.startswith(_SYSMON_PROVIDER) for e in events):
-            stats.note = (
+            notes.append(
                 "events Sysmon lus mais AUCUN NetworkConnect (EID3) : "
                 "l'attribution process<->flux ne peut pas fonctionner. "
                 "Activer : sysmon -c <chemin>\\netverdict\\capture\\"
                 "sysmon-netverdict.xml (console administrateur)")
+        if any(e.message.startswith(_WFP_PROVIDER) for e in events):
+            notes.append(
+                "events de securite Windows lus mais AUCUN WFP 5156/5157 "
+                "(Filtering Platform Connection) : l'attribution "
+                "process<->flux ne peut pas fonctionner. Activer : "
+                'auditpol /set /subcategory:"Filtering Platform Connection" '
+                "/success:enable /failure:enable -- TRES verbeux (beaucoup "
+                "d'evenements sur une machine chargee) : a n'activer que le "
+                "temps du diagnostic, puis desactiver avec "
+                "auditpol /set /subcategory:\"Filtering Platform Connection\" "
+                "/success:disable /failure:disable")
+        stats.note = " ".join(notes)
 
     events.sort(key=lambda e: e.ts)
     return events, stats

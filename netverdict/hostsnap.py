@@ -73,23 +73,52 @@ class HostSnapshot:
 
     _WILDCARDS = {"0.0.0.0", "::", ""}
 
+    # Une socket sans process proprietaire : TIME_WAIT/CLOSE_WAIT survivent au
+    # process qui les a ouvertes, et l'OS les rattache alors a un pseudo-
+    # process (Windows : "Idle" pid 0 ou "System" ; Linux : pas de users:()).
+    # Afficher « socket detenue par Idle (pid 0) » n'est pas une attribution,
+    # c'est du bruit qui ressemble a une reponse — et sur une capture reelle
+    # ca designait un coupable inexistant (constate le 26/07). Mieux vaut ne
+    # rien dire : l'absence d'attribution est une information honnete.
+    _PSEUDO_PROCESS = {"idle", "system", "system idle process", "-", ""}
+
+    @classmethod
+    def _est_proprietaire_reel(cls, conn: dict) -> bool:
+        pid = conn.get("pid")
+        if pid in (0, None):
+            return False
+        nom = str(conn.get("process") or "").strip().lower()
+        return nom not in cls._PSEUDO_PROCESS
+
     def _lookup(self, ip: str, port: int) -> Optional[dict]:
         """Le PORT seul ne suffit pas : un port-forward local (VBoxHeadless,
         ssh -L, docker-proxy) ecoute le meme numero qu'un service distant et
         se ferait attribuer le flux a tort (constate sur capture reelle).
         L'IP locale doit correspondre a l'extremite du flux ; une ecoute
         wildcard reste acceptee, une IP differente est rejetee."""
-        for c in self._by_local_port.get(port, []):
-            local_ip = str(c.get("local_ip", ""))
-            if local_ip == ip or local_ip in self._WILDCARDS:
+        candidats = [c for c in self._by_local_port.get(port, [])
+                     if str(c.get("local_ip", "")) == ip
+                     or str(c.get("local_ip", "")) in self._WILDCARDS]
+        # Un vrai proprietaire d'abord : sur un port reutilise, la socket
+        # ESTABLISHED du process vivant doit primer sur un TIME_WAIT rattache
+        # a "Idle". A defaut, on retourne le candidat pseudo-process : les
+        # metriques machine (cpu, disque) restent utiles, seul le nom de
+        # process sera tu par context_for().
+        for c in candidats:
+            if self._est_proprietaire_reel(c):
                 return c
-        return None
+        return candidats[0] if candidats else None
 
     def context_for(self, sig: FlowSignals) -> Optional[HostContext]:
         """Le snapshot vient d'UNE machine : on matche (ip, port) locaux,
         cote serveur (cas le plus courant) puis cote client."""
         conn = (self._lookup(sig.server, sig.sport)
                 or self._lookup(sig.client, sig.cport))
+        # Pseudo-process (Idle/System/pid 0) : on TAIT le nom et le pid plutot
+        # que de presenter une non-information comme une attribution. Les
+        # metriques machine restent renseignees — elles, sont vraies.
+        if conn is not None and not self._est_proprietaire_reel(conn):
+            conn = None
         pid = conn.get("pid") if conn else None
         return HostContext(
             host=self.host,

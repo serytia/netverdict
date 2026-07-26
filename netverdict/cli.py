@@ -194,6 +194,94 @@ def cmd_capture(args: argparse.Namespace) -> int:
         return 2
 
 
+def cmd_compare(args: argparse.Namespace) -> int:
+    """Compare deux captures du meme trafic prises en deux points."""
+    from rich.console import Console
+    from rich.text import Text
+
+    from .compare import comparer
+
+    try:
+        resultats, diag = comparer(args.amont, args.aval)
+    except FileNotFoundError as e:
+        print(f"Fichier introuvable : {e.filename}", file=sys.stderr)
+        return 2
+    except ValueError as e:
+        print(f"{e}", file=sys.stderr)
+        return 2
+
+    # En mode --json, RIEN d'autre ne doit sortir sur stdout : une seule
+    # ligne de contexte suffit a rendre la sortie non parsable par le script
+    # appelant. Les avertissements partent alors sur stderr.
+    con = Console(file=sys.stderr if args.json else None)
+    con.print()
+    con.print(Text(f"amont : {diag['flux_a']} flux   aval : {diag['flux_b']} "
+                   f"flux   communs : {diag['flux_communs']}", style="dim"))
+    if diag["nat_probable"]:
+        con.print(Text(
+            "AUCUN flux commun alors que les deux captures contiennent du "
+            "trafic : un equipement reecrit probablement les adresses (NAT) "
+            "entre les deux points, ou les captures ne portent pas sur le "
+            "meme trafic. Comparaison impossible en l'etat — capturer en "
+            "amont ET en aval du NAT, ou filtrer sur le trafic traduit.",
+            style="bold red"))
+        return 2
+    if not resultats:
+        con.print(Text("aucun flux commun aux deux captures : verifier "
+                       "qu'elles portent sur le meme trafic et se recouvrent "
+                       "dans le temps.", style="bold red"))
+        return 2
+
+    if args.json:
+        import json
+        print(json.dumps({
+            "netverdict_compare": 1,
+            "diagnostic": diag,
+            "flux": [{
+                "flow": str(c.cle),
+                "verdict": c.verdict()[0],
+                "explication": c.verdict()[1],
+                "offset_horloge_s": c.offset_horloge_s,
+                "latence_reseau_ms": c.latence_reseau_ms,
+                "note": c.note,
+                "sens": [{"sens": e.sens, "emis": e.segments_amont,
+                          "retrouves": e.segments_aval, "perdus": e.perdus,
+                          "taux_perte": round(e.taux_perte, 4)}
+                         for e in c.ecarts],
+            } for c in resultats],
+        }, indent=2, ensure_ascii=False))
+        return 1 if any(c.verdict()[0] == "RESEAU" for c in resultats) else 0
+
+    couleurs = {"RESEAU": "bold red", "RAS": "bold green", "AMBIGU": "bold cyan"}
+    for c in resultats[:args.top]:
+        verdict, phrase = c.verdict()
+        con.print()
+        con.print(Text(f" {verdict} ", style=couleurs.get(verdict, "bold")),
+                  Text(f"— {c.cle}"))
+        con.print(Text(f"  {phrase}"))
+        for e in c.ecarts:
+            con.print(Text(f"  * {e.sens} : {e.segments_amont} emis, "
+                           f"{e.segments_aval} retrouves"
+                           + (f", {e.perdus} PERDUS ({e.taux_perte:.1%})"
+                              if e.perdus else "")))
+        if c.latence_reseau_ms is not None:
+            con.print(Text(f"  * latence entre les deux points : "
+                           f"{c.latence_reseau_ms:.1f} ms (estimee sur des "
+                           f"segments non retransmis, hypothese de symetrie "
+                           f"des deux sens)", style="dim"))
+        if c.offset_horloge_s:
+            con.print(Text(f"  * decalage d'horloge estime entre les deux "
+                           f"machines : {c.offset_horloge_s:+.3f} s",
+                           style="dim"))
+        if c.note:
+            con.print(Text(f"  ! {c.note}", style="yellow"))
+    if len(resultats) > args.top:
+        con.print(Text(f"\n... {len(resultats) - args.top} autre(s) flux — "
+                       f"--top pour en voir plus", style="dim"))
+    con.print()
+    return 1 if any(c.verdict()[0] == "RESEAU" for c in resultats) else 0
+
+
 def cmd_rules(args: argparse.Namespace) -> int:
     from .rules.engine import load_rules, RuleError
     try:
@@ -264,6 +352,17 @@ def main(argv: list[str] | None = None) -> int:
     pc.add_argument("--duration", type=int, help="Duree de capture en secondes (defaut 60)")
     pc.add_argument("--out", help="Dossier de sortie du bundle")
     pc.set_defaults(func=cmd_capture)
+
+    pcmp = sub.add_parser(
+        "compare",
+        help="Compare deux captures du meme trafic prises en deux points "
+             "(client et serveur) : dit OU les paquets se perdent")
+    pcmp.add_argument("amont", help="Capture cote CLIENT (point amont)")
+    pcmp.add_argument("aval", help="Capture cote SERVEUR (point aval)")
+    pcmp.add_argument("--json", action="store_true", help="Sortie JSON")
+    pcmp.add_argument("--top", type=int, default=10,
+                      help="Nombre max de flux detailles (defaut 10)")
+    pcmp.set_defaults(func=cmd_compare)
 
     pr = sub.add_parser("rules", help="Liste les regles de verdict chargees")
     pr.add_argument("--rules", action="append", default=[],

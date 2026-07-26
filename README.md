@@ -76,9 +76,26 @@ netverdict analyze capture.pcapng --syslog fw01.log    --syslog-tz +02:00
 #   UTC / nom IANA / decalage fixe. Le nom IANA gere l'heure d'ete.
 #   Sans effet sur les lignes RFC5424, qui portent deja leur fuseau.
 
+# OU les paquets se perdent-ils ? Deux captures du meme trafic, deux points.
+netverdict compare amont.pcap aval.pcap
+#   amont = pres du client, aval = pres du serveur, captures SIMULTANEES.
+#   Un segment vu en amont et absent en aval s'est perdu ENTRE les deux
+#   points ; s'ils sont tous retrouves, le chemin intermediaire est hors de
+#   cause et il faut chercher au-dela. C'est le seul moyen de trancher sans
+#   supposition. Les horloges des deux machines n'ont pas besoin d'etre
+#   synchronisees : le decalage est estime, et l'outil se tait sur la latence
+#   plutot que d'en inventer une quand il ne peut pas l'estimer.
+
 # Qui detenait la socket ? La reponse MEME SI le process est deja mort.
 netverdict analyze capture.pcap --audit /var/log/audit/audit.log   # Linux
-netverdict analyze capture.pcapng --events sysmon.xml              # Windows
+netverdict analyze capture.pcapng --events sysmon.xml              # Windows (Sysmon)
+netverdict analyze capture.pcapng --events security.xml            # Windows (WFP natif)
+#   WFP = audit natif Windows, SANS installer d'agent :
+#     auditpol /set /subcategory:"Filtering Platform Connection" /success:enable
+#     wevtutil qe Security /f:xml > security.xml
+#     auditpol /set /subcategory:"Filtering Platform Connection" /success:disable
+#   (tres verbeux : a activer le temps du diagnostic. 5157 dit aussi quel
+#    process s'est fait BLOQUER une connexion — Sysmon, lui, reste muet.)
 #   Le snapshot d'etat hote est pris a UN instant : il rate le process qui
 #   s'est termine avant la fin de la capture. Un journal, lui, date chaque
 #   connexion a son etablissement — l'attribution devient retroactive.
@@ -153,8 +170,10 @@ Ajouter ses propres regles : `netverdict analyze ... --rules mes_regles.yaml`
 | | Analyse (`analyze`) | Capture assistee | Jointure process <-> flux |
 |---|---|---|---|
 | Linux | oui | `capture.sh` (tcpdump + ss) | `--audit` (auditd) |
-| Windows | oui | `capture.ps1` (pktmon, natif) | `--events` (Sysmon EID 3) |
+| Windows | oui | `capture.ps1` (pktmon, natif) | `--events` : Sysmon EID 3, **ou WFP 5156/5157 sans agent** |
 | macOS | oui | non — capturer avec `tcpdump`, puis analyser | non |
+
+`compare` (deux captures, deux points) fonctionne sur les trois.
 
 CI : Linux/Windows/macOS x Python 3.11-3.13, plus un job en fuseau decale,
 un avec les extras installes, un sur le paquet construit.
