@@ -9,6 +9,29 @@ description = "Triage d'incident reseau/app/OS : analyse une capture et rend un 
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "GPL-2.0-only" }
+authors = [{ name = "rhnetwork" }]
+keywords = ["pcap", "tcp", "network", "troubleshooting", "sysadmin",
+            "packet-analysis", "incident-response", "sysmon", "auditd"]
+# Ce que la page PyPI affiche comme preuve de support : sans ces lignes, un
+# admin qui hesite ne voit ni les versions de Python, ni le fait que l'outil
+# tourne ailleurs que sur la machine de son auteur.
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: System Administrators",
+    "Intended Audience :: Information Technology",
+    "License :: OSI Approved :: GNU General Public License v2 (GPLv2)",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: System :: Networking :: Monitoring",
+    "Topic :: System :: Systems Administration",
+    "Topic :: Security",
+    "Natural Language :: French",
+]
+
 dependencies = [
     # dpkt et non pyshark/tshark : parseur 100 % Python -> aucune dependance
     # systeme (Wireshark absent de la plupart des serveurs qu'on analyse).
@@ -22,6 +45,11 @@ dependencies = [
     # README annoncent ce format au meme rang que les autres.
     "tzdata; sys_platform == 'win32'",
 ]
+
+[project.urls]
+Homepage = "https://github.com/serytia/netverdict"
+Repository = "https://github.com/serytia/netverdict"
+Issues = "https://github.com/serytia/netverdict/issues"
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
