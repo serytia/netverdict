@@ -5,53 +5,57 @@
 [![CI](https://github.com/serytia/netverdict/actions/workflows/ci.yml/badge.svg)](https://github.com/serytia/netverdict/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-GPLv2-blue)](LICENSE)
 
-**La capture reseau dit si le probleme vient du reseau, de l'application ou du
-systeme — avec les preuves, et une piste de correction.**
+**The packet capture says whether the problem is the network, the application
+or the host — with the evidence, and a suggested fix.**
 
-Fini le blame game "c'est le reseau / c'est l'appli / c'est le serveur".
-`netverdict` lit un pcap (et si possible un snapshot de l'etat de l'hote pris
-au meme moment), en extrait les signaux TCP qui ne mentent pas, et rend un
-**verdict argumente** :
+🇫🇷 [Version française : README.fr.md](README.fr.md)
+
+No more "it's the network / it's the app / it's the server" blame game.
+`netverdict` reads a pcap (plus, when available, a snapshot of the host state
+taken at the same moment), extracts the TCP signals that don't lie, and returns
+an **argued verdict**:
 
 ```
-$ netverdict analyze capture.pcapng --snapshot snapshot.json
+$ netverdict analyze capture.pcapng --lang en
 
-18 paquets lus - 18 TCP, 0 ICMP, 0 non-IP, 0 illisibles - 1 conversations
-+---------  APP - 10.0.0.42:51006 -> 10.0.0.5:5432 [confiance haute] --------+
-| Reponse applicative lente, reception prouvee par ACK rapide                |
-|   * 3 echanges : ACK serveur en 5 ms mais reponse en 800 ms (p50), 0 perte |
-|   * etat hote : [SRV-DB01] socket detenue par postgres (pid 4212),         |
-|     cpu machine 22%, disque 97%, ram libre 512 Mo                          |
-|                                                                            |
-| Piste de correction :                                                      |
-|   Le reseau a livre la requete (ACK immediat) puis a attendu l'application.|
-|   Chercher COTE APPLICATIF de 10.0.0.5:5432 : ...                          |
-+----------------------------------------------------------------------------+
+18 packets read — 18 TCP, 0 ICMP, 0 non-IP, 0 unreadable — 1 conversations
+┌─────────  APP — 10.0.0.42:51006 -> 10.0.0.5:5432 [high confidence] ─────────┐
+│ Slow application response, reception proven by a fast ACK                   │
+│   * 3 exchanges: server ACK in 5 ms but response in 800 ms (p50), 0 loss    │
+│                                                                             │
+│ Suggested fix:                                                              │
+│   The network delivered the request (immediate ACK) and then waited for     │
+│   the application. Look on the APPLICATION SIDE of 10.0.0.5:5432:           │
+│   1. Internal processing time (application logs at the same timestamp)      │
+│   2. Downstream dependencies: database, third-party API, DNS resolution     │
+│      done BY the server — the stall is often one hop further back           │
+│   3. Exhausted thread/connection pool (requests queuing up).                │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-Le raisonnement est celui qu'un expert applique en lisant un pcap dans
-Wireshark — encode dans un moteur de regles deterministe :
+The reasoning is what an expert applies when reading a pcap in Wireshark —
+encoded in a deterministic rule engine:
 
-| Signature observee | Verdict |
+| Observed signature | Verdict |
 |---|---|
-| SYN repetes sans reponse | RESEAU (DROP silencieux ou hote injoignable) |
-| ICMP admin-prohibited | RESEAU (REJECT explicite, l'equipement est identifie) |
-| RST immediat au SYN | APP (rien n'ecoute sur ce port) |
-| Retransmissions massives | RESEAU (perte sur le chemin) |
-| Zero window | HOTE (l'application ne lit plus sa socket) |
-| ACK rapide mais reponse lente | APP (le delai est dans le serveur, preuve a l'appui) |
-| ICMP fragmentation-needed | RESEAU (MTU/tunnel) |
-| RST en pleine session | AMBIGU (timeout firewall, IPS, ou crash — qui a emis ?) |
+| Repeated SYN with no answer | NETWORK (silent DROP or unreachable host) |
+| ICMP admin-prohibited | NETWORK (explicit REJECT, the device is identified) |
+| Immediate RST to SYN | APP (nothing listening on that port) |
+| Massive retransmissions | NETWORK (loss on the path) |
+| Zero window | HOST (the application stopped reading its socket) |
+| Fast ACK but slow response | APP (the delay is inside the server, evidence attached) |
+| ICMP fragmentation-needed | NETWORK (MTU/tunnel) |
+| RST mid-session | AMBIGUOUS (firewall timeout, IPS, or crash — who sent it?) |
 
-## Installation
+## Install
 
 ```
-pip install netverdict                # analyse : aucune dependance systeme
-pip install "netverdict[explain]"     # + synthese narrative via l'API Claude (optionnel)
-pip install "netverdict[evtx]"        # + lecture directe des .evtx binaires
+pip install netverdict                # analysis: no system dependency
+pip install "netverdict[explain]"     # + narrative summary via the Claude API (optional)
+pip install "netverdict[evtx]"        # + direct reading of binary .evtx files
 ```
 
-Depuis les sources (pour contribuer) :
+From source (to contribute):
 
 ```
 git clone https://github.com/serytia/netverdict
@@ -60,237 +64,233 @@ pip install -e ".[dev]"
 pytest
 ```
 
-100 % Python (dpkt). Pas besoin de Wireshark/tshark, ni sur le poste
-d'analyse, ni sur les serveurs.
+100% Python (dpkt). No Wireshark/tshark needed, neither on the analysis
+machine nor on the servers.
+
+## Output language
+
+Console output defaults to **French** (the tool's original audience). One flag
+— or one environment variable, so you never have to repeat it — switches
+everything a human reads to English:
+
+```
+netverdict analyze capture.pcap --lang en
+export NETVERDICT_LANG=en                 # Windows: $env:NETVERDICT_LANG="en"
+```
+
+`--lang` translates verdict titles, evidence, suggested fixes, the timeline,
+`--help`, error messages, and the language requested from the model by
+`--explain`. `--lang` beats `$NETVERDICT_LANG`, which beats the default.
+
+What `--lang` deliberately never changes: the verdict tokens (`RESEAU`, `APP`,
+`OS`, `HOTE`, `AMBIGU`, `RAS`), `confidence` values and JSON keys. Those are
+identifiers, not prose: they appear in user `--rules` files and in scripts
+that filter the `--json` output. Translating them would break a
+`verdict == "RESEAU"` check the day someone exports `NETVERDICT_LANG=en` —
+with no signal at all. The *displayed* console label follows the language
+(`NETWORK`, `HOST`...); the data doesn't move.
+
+Custom rules (`--rules my-rules.yaml`) accept sibling fields
+`title_en` / `evidence_en` / `remediation_en`. A rule without a translation
+falls back to its French text whatever the requested language, without error.
 
 ## Usage
 
 ```
-# Analyser une capture existante
+# Analyze an existing capture
 netverdict analyze capture.pcapng
-netverdict analyze capture.pcapng --json          # sortie machine
-netverdict analyze capture.pcapng --explain       # + synthese narrative (API Claude)
+netverdict analyze capture.pcapng --json          # machine output
+netverdict analyze capture.pcapng --explain       # + narrative summary (Claude API)
 
-# v1.1 : croiser avec ce qui a change dans l'infra (timeline)
+# Cross-reference with what changed in the infrastructure (timeline)
 netverdict analyze capture.pcapng --events events.xml --syslog fw01.log
-#   --events : events Windows (.evtx avec l'extra [evtx], ou export XML :
+#   --events : Windows events (.evtx with the [evtx] extra, or an XML export:
 #              wevtutil qe System /f:xml > events.xml)
-#   --syslog : fichiers syslog plats (RFC3164/RFC5424 melanges acceptes)
+#   --syslog : flat syslog files (mixed RFC3164/RFC5424 accepted)
 
-# Fuseau des lignes RFC3164 (le format n'en porte AUCUN). A donner des que le
-# syslog ne vient pas d'une machine reglee comme le poste d'analyse : sinon les
-# evenements se decalent et sortent de la fenetre, en silence.
+# Timezone of RFC3164 lines (the format carries NONE). Required whenever the
+# syslog does not come from a machine set like the analysis host: otherwise
+# events shift out of the window, silently.
 netverdict analyze capture.pcapng --syslog central.log --syslog-tz UTC
 netverdict analyze capture.pcapng --syslog fw01.log    --syslog-tz Europe/Paris
 netverdict analyze capture.pcapng --syslog fw01.log    --syslog-tz +02:00
-#   UTC / nom IANA / decalage fixe. Le nom IANA gere l'heure d'ete.
-#   Sans effet sur les lignes RFC5424, qui portent deja leur fuseau.
+#   UTC / IANA name / fixed offset. The IANA name handles DST.
+#   No effect on RFC5424 lines, which carry their own timezone.
 
-# OU les paquets se perdent-ils ? Deux captures du meme trafic, deux points.
-netverdict compare amont.pcap aval.pcap
-#   amont = pres du client, aval = pres du serveur, captures SIMULTANEES.
-#   Un segment vu en amont et absent en aval s'est perdu ENTRE les deux
-#   points ; s'ils sont tous retrouves, le chemin intermediaire est hors de
-#   cause et il faut chercher au-dela. C'est le seul moyen de trancher sans
-#   supposition. Les horloges des deux machines n'ont pas besoin d'etre
-#   synchronisees : le decalage est estime, et l'outil se tait sur la latence
-#   plutot que d'en inventer une quand il ne peut pas l'estimer.
+# WHERE are packets getting lost? Two captures of the same traffic, two points.
+netverdict compare upstream.pcap downstream.pcap
+#   upstream = near the client, downstream = near the server, captured
+#   SIMULTANEOUSLY. A segment seen upstream and missing downstream was lost
+#   BETWEEN the two points; if all are accounted for, the middle path is
+#   cleared and the search moves past it. It is the only way to settle the
+#   question without guessing. The two machines' clocks do not need to be
+#   synchronized: the offset is estimated, and the tool stays silent about
+#   latency rather than inventing one when it cannot estimate it.
 
-# Qui detenait la socket ? La reponse MEME SI le process est deja mort.
+# WHO owned the socket? The answer EVEN IF the process is already dead.
 netverdict analyze capture.pcap --audit /var/log/audit/audit.log   # Linux
 netverdict analyze capture.pcapng --events sysmon.xml              # Windows (Sysmon)
-netverdict analyze capture.pcapng --events security.xml            # Windows (WFP natif)
-#   WFP = audit natif Windows, SANS installer d'agent :
+netverdict analyze capture.pcapng --events security.xml            # Windows (native WFP)
+#   WFP = native Windows auditing, with NO agent to install:
 #     auditpol /set /subcategory:"Filtering Platform Connection" /success:enable
 #     wevtutil qe Security /f:xml > security.xml
 #     auditpol /set /subcategory:"Filtering Platform Connection" /success:disable
-#   (tres verbeux : a activer le temps du diagnostic. 5157 dit aussi quel
-#    process s'est fait BLOQUER une connexion — Sysmon, lui, reste muet.)
-#   Le snapshot d'etat hote est pris a UN instant : il rate le process qui
-#   s'est termine avant la fin de la capture. Un journal, lui, date chaque
-#   connexion a son etablissement — l'attribution devient retroactive.
-#   Linux  : regle a charger (une fois) —
+#   (very verbose: enable only for the duration of the diagnosis. 5157 also
+#    names the process whose connection got BLOCKED — Sysmon stays silent.)
+#   The host snapshot is taken at ONE instant: it misses a process that
+#   exited before the capture ended. A journal dates every connection at
+#   establishment time — attribution becomes retroactive.
+#   Linux  : rule to load (once) —
 #            auditctl -a always,exit -F arch=b64 -S connect -k netverdict_connect
-#            (persistant : un fichier dans /etc/audit/rules.d/)
-#   Windows: Sysmon avec NetworkConnect actif —
+#            (persistent: a file in /etc/audit/rules.d/)
+#   Windows: Sysmon with NetworkConnect enabled —
 #            sysmon -c netverdict/capture/sysmon-netverdict.xml
-#   Si la source est presente mais la regle absente, l'outil le DIT au lieu
-#   de rendre un rapport muet.
-# Le rapport ajoute les changements des 15 min precedant la capture
-# (service installe, regle firewall rechargee, passage sur batterie...)
-# et marque ceux qui precedent l'incident de peu.
+#   If the source is present but the rule is missing, the tool SAYS SO
+#   instead of returning a silent report.
+# The report adds the changes from the 15 minutes before the capture
+# (service installed, firewall rule reloaded, switch to battery power...)
+# and flags those that closely precede the incident.
 #
-# v1.2 : les changements pertinents sont AUSSI rattaches au flux concerne,
-# directement dans son panneau de verdict, sous « A verifier en premier ».
-# Un `*` signale un type de changement pouvant produire ce verdict precis
-# (regle firewall -> RESEAU, crash de service -> APP, batterie -> OS).
-# C'est un CLASSEMENT de suspects, jamais une conclusion de causalite : les
-# changements sans affinite restent affiches, plus bas.
+# Relevant changes are ALSO attached to the affected flow, inside its verdict
+# panel, under "Check first". A `*` marks a change type that can produce that
+# exact verdict (firewall rule -> NETWORK, service crash -> APP,
+# battery -> OS). It is a RANKING of suspects, never a causality conclusion:
+# unrelated changes stay listed, further down.
 
-# Capture assistee : trafic + etat hote en un coup (console admin/root)
-netverdict capture --duration 60                  # Windows: pktmon (natif) / Linux: tcpdump
+# Assisted capture: traffic + host state in one go (admin/root console)
+netverdict capture --duration 60                  # Windows: pktmon (native) / Linux: tcpdump
 
-# Lister les regles de verdict
+# List the verdict rules
 netverdict rules
-
-# Sortie en anglais (defaut : francais). Disponible sur toutes les
-# sous-commandes, et via l'environnement pour ne pas la repeter :
-netverdict analyze capture.pcap --lang en
-export NETVERDICT_LANG=en                         # Windows : $env:NETVERDICT_LANG="en"
 ```
 
-Code retour : `0` = rien d'anormal, `1` = au moins un verdict, `2` = erreur.
+Exit code: `0` = nothing abnormal, `1` = at least one verdict, `2` = error.
 
-### Langue de la sortie
+Assisted capture is **truncated by default** (128 bytes/packet on Windows,
+96 on Linux): enough for the analysis, and light.
 
-`--lang {fr,en}` traduit **tout ce qu'un humain lit** : titres de verdict,
-preuves, pistes de correction, timeline, `--help`, messages d'erreur, et la
-langue demandee au modele par `--explain`. Le defaut reste `fr` ; `--lang`
-prime sur `$NETVERDICT_LANG`, qui prime sur le defaut.
+**This is NOT a guarantee of credential absence**, contrary to what this
+README claimed before 2026-07-25. Truncation cuts at N bytes *from the start
+of the frame* — a packet shorter than N is therefore captured IN FULL,
+payload included. Measured:
 
-Ce que `--lang` ne change **jamais**, volontairement : les jetons de verdict
-(`RESEAU`, `APP`, `OS`, `HOTE`, `AMBIGU`, `RAS`), les valeurs de `confidence`
-et les cles du JSON. Ce sont des identifiants, pas de la prose : ils
-apparaissent dans les fichiers `--rules` et dans les scripts qui filtrent la
-sortie `--json`. Les traduire ferait casser un `verdict == "RESEAU"` le jour
-ou quelqu'un exporte `NETVERDICT_LANG=en` — sans le moindre message. Le
-libelle *affiche* en console suit la langue (`NETWORK`, `HOST`...), la donnee
-ne bouge pas.
-
-Les regles personnelles (`--rules mes-regles.yaml`) acceptent les champs
-freres `title_en` / `evidence_en` / `remediation_en`. Une regle sans
-traduction sort en francais quelle que soit la langue demandee, sans erreur.
-
-La capture assistee est **tronquee par defaut** (128 octets/paquet sous Windows,
-96 sous Linux) : suffisant pour l'analyse et leger.
-
-**Ce n'est PAS une garantie d'absence de credential**, contrairement a ce que
-ce README affirmait avant le 25/07/2026. La troncature coupe a N octets *depuis
-le debut de la trame* — un paquet plus court que N est donc capture EN ENTIER,
-payload compris. Mesure :
-
-| Payload | `-s 96` | 128 o |
+| Payload | `-s 96` | 128 B |
 |---|---|---|
-| `PASS hunter2` (POP3/FTP en clair) | **complet** | **complet** |
-| `USER admin` + `PASS ...` | **complet** | **complet** |
-| `{"token":"eyJhbGciOi..."}` | **complet** | **complet** |
-| En-tete `Authorization: Basic ...` (51 o) | 42/51 o | **complet** |
+| `PASS hunter2` (cleartext POP3/FTP) | **complete** | **complete** |
+| `USER admin` + `PASS ...` | **complete** | **complete** |
+| `{"token":"eyJhbGciOi..."}` | **complete** | **complete** |
+| `Authorization: Basic ...` header (51 B) | 42/51 B | **complete** |
 
-Autrement dit : la troncature elimine les gros transferts, pas les secrets
-courts — et les protocoles d'authentification en clair sont precisement courts.
-Traiter un bundle comme une donnee sensible : le relire avant de le transmettre,
-et preferer `--full-packets` uniquement quand c'est necessaire et assume.
+In other words: truncation removes large transfers, not short secrets — and
+cleartext authentication protocols are precisely short. Treat a bundle as
+sensitive data: review it before sharing it, and reserve `--full-packets`
+for when it is necessary and deliberate.
 
-L'option `--explain` n'envoie jamais le pcap : uniquement le rapport JSON
-(signaux et verdicts).
+`--explain` never sends the pcap: only the JSON report (signals and verdicts).
 
-## Comment ca marche
+## How it works
 
-Deux etages strictement separes, comme decodeurs/regles dans Wazuh :
+Two strictly separated stages, like decoders/rules in Wazuh:
 
-1. **Mesure** (`pcap.py`, `flows.py`, `signals.py`) : lecture de la capture,
-   reconstruction des conversations TCP, calcul des signaux — retransmissions
-   (avec exclusion des doublons de capture et des keepalives), RTT, zero
-   window, delai requete->reponse applicatif, delai d'ACK serveur, ICMP
-   rattaches. Que des faits, aucun jugement.
-2. **Verdict** (`rules/`) : regles declaratives YAML — conditions sur les
-   signaux, verdict, confiance, preuves interpolees, remediation redigee.
-   Chaque seuil est commente avec sa justification.
+1. **Measurement** (`pcap.py`, `flows.py`, `signals.py`): reading the capture,
+   rebuilding TCP conversations, computing the signals — retransmissions
+   (excluding capture duplicates and keepalives), RTT, zero window,
+   application request->response delay, server ACK delay, attached ICMP.
+   Facts only, no judgment.
+2. **Verdict** (`rules/`): declarative YAML rules — conditions on the signals,
+   verdict, confidence, interpolated evidence, written remediation. Every
+   threshold is commented with its justification.
 
-Ajouter ses propres regles : `netverdict analyze ... --rules mes_regles.yaml`
-(meme format que `netverdict/rules/builtin.yaml`).
+Add your own rules: `netverdict analyze ... --rules my_rules.yaml`
+(same format as `netverdict/rules/builtin.yaml`).
 
-## Plateformes
+## Platforms
 
-| | Analyse (`analyze`) | Capture assistee | Jointure process <-> flux |
+| | Analysis (`analyze`) | Assisted capture | Process <-> flow join |
 |---|---|---|---|
-| Linux | oui | `capture.sh` (tcpdump + ss) | `--audit` (auditd) |
-| Windows | oui | `capture.ps1` (pktmon, natif) | `--events` : Sysmon EID 3, **ou WFP 5156/5157 sans agent** |
-| macOS | oui | non — capturer avec `tcpdump`, puis analyser | non |
+| Linux | yes | `capture.sh` (tcpdump + ss) | `--audit` (auditd) |
+| Windows | yes | `capture.ps1` (pktmon, native) | `--events`: Sysmon EID 3, **or WFP 5156/5157 with no agent** |
+| macOS | yes | no — capture with `tcpdump`, then analyze | no |
 
-`compare` (deux captures, deux points) fonctionne sur les trois.
+`compare` (two captures, two points) works on all three.
 
-CI : Linux/Windows/macOS x Python 3.11-3.13, plus un job en fuseau decale,
-un avec les extras installes, un sur le paquet construit.
+CI: Linux/Windows/macOS x Python 3.11-3.13, plus one job under a shifted
+timezone, one with the extras installed, one against the built package.
 
-## Statut de validation
+## Validation status
 
-- **Valide** : 239 tests automatises, verts sur Linux, Windows et macOS
-  (Python 3.11 a 3.13) et sous fuseau decale.
-- **Valide au kernel** : 8 scenarios de panne reproduits par un vrai noyau
-  Linux (netem, iptables, vraies sockets — `lab/`), plus la jointure auditd
-  sur un journal auditd reel. Les pcaps produits servent de fixtures.
-- **Valide sur incident reel** : chaine de capture Windows complete (pktmon
-  -> analyse) contre un service lent, un port ferme et un port filtre — les
-  trois verdicts exacts.
-- **Pas encore fait** : incidents de production subis (non provoques). Les
-  verdicts sont un point de depart outille, pas un oracle — AMBIGU est un
-  verdict assume, et le rapport dit ce qu'il n'a pas su lire.
+- **Validated**: 323 automated tests, green on Linux, Windows and macOS
+  (Python 3.11 to 3.13) and under a shifted timezone.
+- **Validated against a kernel**: 8 failure scenarios reproduced by a real
+  Linux kernel (netem, iptables, real sockets — `lab/`), plus the auditd join
+  against a real auditd journal. The resulting pcaps serve as fixtures.
+- **Validated on a real incident**: full Windows capture chain (pktmon ->
+  analysis) against a slow service, a closed port and a filtered port — all
+  three verdicts exact.
+- **Not done yet**: production incidents suffered (not provoked). Verdicts are
+  an instrumented starting point, not an oracle — AMBIGUOUS is an owned
+  verdict, and the report says what it could not read.
 
-Ce que ces validations ont coute, et pourquoi elles figurent ici : chacune a
-trouve des defauts que les tests sur donnees fabriquees ne voyaient pas —
-detection de retransmissions cassee par TSO/GSO, `pktmon` qui annonce un
-type de trame et en ecrit un autre, `auditd` dont le format par defaut n'est
-pas celui de sa documentation, et des pannes Windows declenchees par des
-donnees Linux. Les fixtures ecrites a la main decrivent l'outil qu'on
-imagine ; l'execution reelle decrit celui qui existe.
+What these validations cost, and why they are listed here: each one found
+defects that tests on fabricated data could not see — retransmission
+detection broken by TSO/GSO, `pktmon` announcing one frame type and writing
+another, `auditd` whose default format is not the one in its documentation,
+and Windows failures triggered by Linux data. Hand-written fixtures describe
+the tool you imagine; real execution describes the one that exists.
 
-## Limites connues (v1)
+## Known limits (v1)
 
-- TCP/IPv4-IPv6 uniquement (pas d'UDP/QUIC, pas de reassemblage de fragments).
-- RTT p95 pollue par les delayed ACK (~40-200 ms) : min et p50 sont fiables.
-  Aucune regle ne rend donc un verdict RESEAU sur le seul p95. En revanche un
-  p95 eleve n'est pas ignore : une mediane saine avec une queue significative
-  produit un verdict AMBIGU explicite (« pics de latence que la capture ne sait
-  pas attribuer »), qui nomme les deux causes possibles — gigue du chemin ou
-  delayed ACK — et donne de quoi les separer. Ni faux verdict reseau, ni faux
-  « transport sain ».
-- Sens client/serveur estime par heuristique si la capture demarre en pleine
-  session (signale dans le rapport).
-- Le snapshot hote vient d'une seule machine (celle ou on a lance la capture).
-  Il est pris a UN instant : il rate le process deja mort a la fin de la
-  capture. La jointure Sysmon (Event ID 3), elle, est retroactive et le
-  retrouve — voir « Jointure process » ci-dessous.
-- Jointure process <-> flux : correspondance sur le quadruplet EXACT (les deux
-  sens sont testes), TCP uniquement, avec 60 s de tolerance d'horloge entre la
-  capture et le journal. Un port client reutilise pendant la capture produit
-  plusieurs candidats : le plus proche du debut du flux est retenu, et le
-  rapport signale l'ambiguite plutot que de la taire.
-- Syslog RFC3164 (sans fuseau) : par defaut l'heure est interpretee dans le
-  fuseau du poste d'analyse, et les horodatages concernes sont marques `~`
-  dans le rapport. Une source en UTC lue depuis un poste en heure locale se
-  decale alors HORS de la fenetre, et le rapport affiche « aucun changement
-  detecte » — a lire comme « rien n'a ete retenu », pas comme « rien n'a
-  change ». **Corriger avec `--syslog-tz`** (voir Usage) : les horodatages
-  deviennent exacts, le `~` disparait et le delai avant l'incident est donne
-  a la seconde.
-- `--syslog-tz` avec un decalage FIXE (`+02:00`) est faux de part et d'autre
-  d'un changement d'heure : un fichier qui traverse le passage a l'heure
-  d'hiver sera mal date sur une moitie. Preferer un nom IANA
-  (`Europe/Paris`), qui gere l'heure d'ete. Sur une heure ambigue (celle qui
-  existe deux fois lors du retour a l'heure d'hiver), la premiere occurrence
-  est retenue.
+- TCP/IPv4-IPv6 only (no UDP/QUIC, no fragment reassembly).
+- RTT p95 polluted by delayed ACKs (~40-200 ms): min and p50 are reliable.
+  No rule therefore returns a NETWORK verdict on p95 alone. A high p95 is not
+  ignored either: a healthy median with a significant tail produces an
+  explicit AMBIGUOUS verdict ("latency spikes the capture cannot attribute")
+  that names both possible causes — path jitter or delayed ACK — and gives
+  what is needed to separate them. Neither a false network verdict, nor a
+  false "transport healthy".
+- Client/server direction estimated heuristically if the capture starts
+  mid-session (flagged in the report).
+- The host snapshot comes from a single machine (the one where the capture
+  was launched). It is taken at ONE instant: it misses a process already dead
+  by the end of the capture. The Sysmon join (Event ID 3) is retroactive and
+  recovers it.
+- Process <-> flow join: match on the EXACT four-tuple (both directions
+  tested), TCP only, with 60 s of clock tolerance between capture and
+  journal. A client port reused during the capture yields several candidates:
+  the closest to the flow start is kept, and the report flags the ambiguity
+  rather than hiding it.
+- RFC3164 syslog (no timezone): by default timestamps are interpreted in the
+  analysis machine's timezone, and the affected timestamps are marked `~` in
+  the report. A UTC source read from a machine on local time then shifts OUT
+  of the window, and the report shows "no infrastructure changes detected" —
+  to be read as "nothing was retained", not "nothing changed". **Fix with
+  `--syslog-tz`** (see Usage): timestamps become exact, the `~` disappears
+  and the delay before the incident is given to the second.
+- `--syslog-tz` with a FIXED offset (`+02:00`) is wrong on either side of a
+  DST switch: a file that crosses the fall-back transition will be misdated
+  on one half. Prefer an IANA name (`Europe/Paris`), which handles DST. On an
+  ambiguous hour (the one that exists twice at fall-back), the first
+  occurrence is kept.
 
 ## Roadmap
 
-- v1.1 (fait) : timeline multi-sources — events Windows (EVTX/XML) + syslog
-  pour repondre a "qu'est-ce qui a change dans l'infra juste avant ?".
-- v1.2 (fait) : `--syslog-tz`, correlation changement->verdict, jointure
-  process<->flux retroactive via Sysmon Event ID 3. **Reste a valider sur un
-  vrai enregistrement Sysmon** : les noms de champs viennent du schema du
-  binaire, la forme du XML est celle des evenements Windows standards deja
-  parses par sources/evtx.py. Pour activer la source (console admin) :
+- v1.1 (done): multi-source timeline — Windows events (EVTX/XML) + syslog to
+  answer "what changed in the infrastructure just before?".
+- v1.2 (done): `--syslog-tz`, change->verdict correlation, retroactive
+  process<->flow join via Sysmon Event ID 3. To enable the source (admin
+  console):
 
   ```powershell
-  sysmon -i -accepteula <chemin>\netverdict\capture\sysmon-netverdict.xml
+  sysmon -i -accepteula <path>\netverdict\capture\sysmon-netverdict.xml
   ```
 
-  Cette configuration n'active QUE l'Event ID 3 (NetworkConnect), desactive par
-  defaut dans le Sysmon livre avec Windows 11 24H2. Les 21 autres types
-  d'evenements y sont en `onmatch="include"` sans aucune regle, ce qui les
-  laisse eteints — on n'allume pas un journal complet pour une jointure.
-- v2 : capture pilotee des deux cotes (client ET serveur) et comparaison.
+  This configuration enables ONLY Event ID 3 (NetworkConnect), disabled by
+  default in the Sysmon shipped with Windows 11 24H2. The 21 other event
+  types are left `onmatch="include"` with no rule, which keeps them off —
+  you don't turn on a full journal for one join.
+- English output (`--lang en`) — done, see above.
+- v2: capture driven from both sides (client AND server) and comparison.
 
-## Licence
+## License
 
 GPL-2.0
