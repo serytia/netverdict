@@ -24,6 +24,8 @@ from typing import BinaryIO, Iterator, Optional
 
 import dpkt
 
+from .i18n import DEFAULT_LANG, t
+
 # Linktypes rencontres en pratique sur les captures d'admins.
 # (tcpdump Linux = EN10MB ou LINUX_SLL selon -i any ; pktmon Windows = EN10MB ;
 #  loopback Windows/Npcap et BSD = NULL ; certains equipements exportent du RAW.)
@@ -172,7 +174,7 @@ PCAP_MAGICS = {b"\xa1\xb2\xc3\xd4", b"\xd4\xc3\xb2\xa1",   # pcap classique (big
 PCAPNG_MAGIC = b"\x0a\x0d\x0d\x0a"
 
 
-def _open_reader(f: BinaryIO):
+def _open_reader(f: BinaryIO, lang: str = DEFAULT_LANG):
     """Choisit le lecteur d'apres le magic, pas d'apres l'extension :
     les admins renomment les fichiers, le magic ne ment pas."""
     head = f.read(4)
@@ -181,11 +183,7 @@ def _open_reader(f: BinaryIO):
         return dpkt.pcapng.Reader(f)
     if head in PCAP_MAGICS:
         return dpkt.pcap.Reader(f)
-    raise ValueError(
-        "Format non reconnu (ni pcap ni pcapng). "
-        "Si c'est un .etl Windows : le convertir d'abord avec "
-        "'pktmon etl2pcap fichier.etl -o fichier.pcapng'."
-    )
+    raise ValueError(t("err.pcap_format", lang))
 
 
 def _ip_from_frame(buf: bytes, linktype: int):
@@ -286,7 +284,7 @@ def _extract_icmp_event(ts: float, ip, icmp_payload: bytes, icmp_type: int,
         return None
 
 
-def read_capture(path: str | Path) -> Capture:
+def read_capture(path: str | Path, lang: str = DEFAULT_LANG) -> Capture:
     """Lit toute la capture en memoire.
 
     v1 assume le chargement complet : un pcap de triage fait quelques Mo a
@@ -306,7 +304,7 @@ def read_capture(path: str | Path) -> Capture:
     # decoder correctement sans sortir de dpkt, mais on peut REFUSER DE MENTIR.
     st.mixed_linktypes = _detect_mixed_linktypes(path)
     with open(path, "rb") as f:
-        reader = _open_reader(f)
+        reader = _open_reader(f, lang)
         st.linktype = getattr(reader, "datalink", lambda: -1)()
 
         for ts, buf in reader:
