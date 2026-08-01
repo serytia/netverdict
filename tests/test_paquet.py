@@ -86,6 +86,7 @@ def test_cmd_capture_ne_cherche_plus_a_cote_du_paquet(monkeypatch, capsys):
     class Args:
         duration = None
         out = None
+        lang = None            # comme argparse quand --lang n'est pas passe
 
     rc = cmd_capture(Args())
     assert rc == 0, capsys.readouterr().err

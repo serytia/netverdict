@@ -12,16 +12,23 @@ Principes non negociables :
 
 from __future__ import annotations
 
+from .i18n import DEFAULT_LANG, t
+
 MODEL = "claude-opus-5"
 
-SYSTEM = """Tu es un ingenieur reseau senior qui explique un diagnostic a un
+# {langue} est remplace par le nom de la langue demandee (voir
+# i18n.py: explain.language_name). C'est la SEULE chose qui decide de la langue
+# de la synthese : le reste du prompt est un contrat de comportement, pas de
+# la prose affichee, et le traduire n'apporterait rien qu'un risque de
+# divergence entre les deux versions.
+SYSTEM_TEMPLATE = """Tu es un ingenieur reseau senior qui explique un diagnostic a un
 collegue administrateur systeme/reseau competent mais presse.
 
 On te fournit le rapport JSON d'un outil de triage d'incident (analyse de
 capture reseau) : signaux TCP mesures, verdicts rendus par un moteur de regles
 deterministe, preuves et pistes de correction.
 
-Redige en francais une synthese narrative courte (10-20 lignes) :
+Redige en {langue} une synthese narrative courte (10-20 lignes) :
 1. Ce qui se passe, en une phrase de conclusion d'abord.
 2. Le raisonnement : quelles preuves menent au verdict, en langage clair.
 3. La prochaine action concrete, et ce qu'il faut surveiller ensuite.
@@ -32,7 +39,20 @@ Regles strictes :
   ambigues, dis-le clairement.
 - Ne repete pas le JSON : raconte-le.
 - Pas de titres pompeux, pas de liste de 15 recommandations : la synthese
-  d'un collegue senior, directe et actionnable."""
+  d'un collegue senior, directe et actionnable.
+- Les jetons de verdict du rapport (RESEAU, APP, OS, HOTE, AMBIGU, RAS) sont
+  des identifiants internes : ne les cite pas tels quels, dis ce qu'ils
+  signifient dans la langue de la synthese.
+- TOUTE ta reponse est en {langue}, titres et listes compris."""
+
+
+def system_prompt(lang: str = DEFAULT_LANG) -> str:
+    """Prompt systeme pour la langue demandee."""
+    return SYSTEM_TEMPLATE.format(langue=t("explain.language_name", lang))
+
+
+# Conserve pour compatibilite : la valeur historique, en francais.
+SYSTEM = system_prompt(DEFAULT_LANG)
 
 
 class ExplainUnavailable(RuntimeError):
@@ -40,14 +60,11 @@ class ExplainUnavailable(RuntimeError):
     credentials). L'appelant affiche le message et continue sans."""
 
 
-def explain(report_json: str) -> str:
+def explain(report_json: str, lang: str = DEFAULT_LANG) -> str:
     try:
         import anthropic
     except ImportError:
-        raise ExplainUnavailable(
-            "Le SDK 'anthropic' n'est pas installe. "
-            "Installer avec : pip install netverdict[explain]"
-        )
+        raise ExplainUnavailable(t("explain.no_sdk", lang))
 
     client = anthropic.Anthropic()  # cle via ANTHROPIC_API_KEY ou profil `ant auth login`
     try:
@@ -59,27 +76,22 @@ def explain(report_json: str) -> str:
             model=MODEL,
             max_tokens=8000,
             betas=["server-side-fallback-2026-07-01"],
-            system=SYSTEM,
+            system=system_prompt(lang),
             messages=[{
                 "role": "user",
-                "content": ("Rapport netverdict a expliquer :\n\n" + report_json),
+                "content": t("explain.user_prompt", lang, report=report_json),
             }],
             extra_body={"fallbacks": "default"},
         )
     except anthropic.AuthenticationError:
-        raise ExplainUnavailable(
-            "Pas de credentials API valides. Definir ANTHROPIC_API_KEY "
-            "ou se connecter avec `ant auth login`."
-        )
+        raise ExplainUnavailable(t("explain.no_credentials", lang))
     except anthropic.APIConnectionError:
-        raise ExplainUnavailable("API Anthropic injoignable (reseau ?).")
+        raise ExplainUnavailable(t("explain.unreachable", lang))
     except anthropic.APIStatusError as e:
-        raise ExplainUnavailable(f"Erreur API ({e.status_code}): {e.message}")
+        raise ExplainUnavailable(t("explain.api_error", lang,
+                                   code=e.status_code, message=e.message))
 
     if response.stop_reason == "refusal":
-        raise ExplainUnavailable(
-            "La requete a ete declinee par les garde-fous du modele. "
-            "Les verdicts et remediations du rapport restent valables tels quels."
-        )
+        raise ExplainUnavailable(t("explain.refusal", lang))
     parts = [b.text for b in response.content if b.type == "text"]
     return "\n".join(parts).strip()

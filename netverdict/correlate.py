@@ -28,6 +28,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
+from .i18n import DEFAULT_LANG, t
 from .rules.engine import FlowVerdict
 from .timeline import CHANGE_CATEGORIES, Timeline, TimelineEvent
 
@@ -79,16 +80,18 @@ class Suspect:
     def during_flow(self) -> bool:
         return self.delay_s < 0
 
-    def describe(self) -> str:
+    def describe(self, lang: str = DEFAULT_LANG) -> str:
         """Une ligne pour le rapport. Sur un horodatage sans fuseau fiable
         (RFC3164 sans --syslog-tz), pas de precision a la seconde : afficher
         un chiffre qu'on n'a pas serait mentir."""
         ecart = abs(self.delay_s)
         if self.event.tz_known:
-            quand = f"{ecart:.0f} s"
+            quand = t("correlate.seconds", lang, n=ecart)
         else:
-            quand = f"environ {max(1, round(ecart / 60))} min (heure source approximative)"
-        position = "pendant le flux" if self.during_flow else "avant le flux"
+            quand = t("correlate.minutes_approx", lang,
+                      n=max(1, round(ecart / 60)))
+        position = t("correlate.during_flow" if self.during_flow
+                     else "correlate.before_flow", lang)
         return f"{quand} {position}"
 
 
@@ -168,19 +171,19 @@ class ProcessAttribution:
     def connection(self):
         return self.event.connection
 
-    def describe(self) -> str:
+    def describe(self, lang: str = DEFAULT_LANG) -> str:
         c = self.connection
         assert c is not None                      # garanti par la construction
-        txt = f"{c.process_label()} cote {self.side}"
+        # `self.side` reste "client"/"serveur" (valeur JSON) ; seul le libelle
+        # affiche suit la langue.
+        txt = t("correlate.attr_side", lang, proc=c.process_label(),
+                side=t(f"correlate.side_{self.side}", lang))
         if c.user:
-            txt += f", utilisateur {c.user}"
+            txt += t("correlate.attr_user", lang, user=c.user)
         if not self.exact:
-            txt += (" — rapproche par la DESTINATION seule (le journal ne "
-                    "donne pas le port source) : un autre process contactant "
-                    "le meme service au meme moment serait indiscernable")
+            txt += t("correlate.attr_inexact", lang)
         if self.candidates > 1:
-            txt += (f" — {self.candidates} connexions correspondaient "
-                    f"(port reutilise ?), la plus proche du debut du flux")
+            txt += t("correlate.attr_candidates", lang, n=self.candidates)
         return txt
 
 

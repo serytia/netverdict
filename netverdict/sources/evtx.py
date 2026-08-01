@@ -48,6 +48,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from ..i18n import DEFAULT_LANG, t
 from ..timeline import ConnectionInfo, SourceStats, TimelineEvent
 
 # Sysmon est livre AVEC Windows 11 24H2 (C:\Windows\System32\sysmon.exe,
@@ -226,7 +227,7 @@ _LEVEL_DEFAULT: dict[str, tuple[str, int]] = {
 # rapport (cf. _LEVEL_DEFAULT.get(level, ("info", 0)) plus bas).
 
 
-def _read_text(path: Path) -> str:
+def _read_text(path: Path, lang: str = DEFAULT_LANG) -> str:
     """Lit le fichier XML en detectant l'encodage par BOM plutot que par
     extension : wevtutil suit l'encodage de sortie de la console qui l'a
     lance (une redirection PowerShell peut ecrire en UTF-16), le BOM est
@@ -244,9 +245,7 @@ def _read_text(path: Path) -> str:
         # Export interrompu en pleine ecriture (longueur impaire en UTF-16) :
         # transformer le crash de codec en consigne actionnable.
         raise ValueError(
-            f"Export XML tronque ou encodage incoherent ({path}) : "
-            "regenerer avec  wevtutil qe System /f:xml > events.xml"
-        ) from exc
+            t("err.evtx_xml_truncated", lang, path=path)) from exc
     return raw.decode("utf-8", errors="replace")
 
 
@@ -564,15 +563,14 @@ def _parse_event_element(ev: ET.Element) -> Optional[TimelineEvent]:
     )
 
 
-def _parse_xml_file(path: Path, stats: SourceStats) -> list[TimelineEvent]:
-    text = _read_text(path)
+def _parse_xml_file(path: Path, stats: SourceStats,
+                    lang: str = DEFAULT_LANG) -> list[TimelineEvent]:
+    text = _read_text(path, lang)
     try:
         root = _wrap_and_parse(text)
     except Exception as exc:
         raise ValueError(
-            f"XML illisible dans {path} ({exc}). L'export wevtutil est-il "
-            "complet ? Regenerer avec : wevtutil qe System /f:xml > events.xml"
-        ) from exc
+            t("err.evtx_xml_unreadable", lang, path=path, e=exc)) from exc
 
     events: list[TimelineEvent] = []
     for ev in _find_events(root):
@@ -586,22 +584,15 @@ def _parse_xml_file(path: Path, stats: SourceStats) -> list[TimelineEvent]:
     return events
 
 
-def _parse_binary(path: Path, stats: SourceStats) -> list[TimelineEvent]:
+def _parse_binary(path: Path, stats: SourceStats,
+                  lang: str = DEFAULT_LANG) -> list[TimelineEvent]:
     try:
         # Import paresseux : python-evtx est un extra optionnel ([evtx]),
         # jamais charge tant qu'on lit du XML (le cas courant, zero
         # dependance).
         import Evtx.Evtx as evtx
     except ImportError as exc:
-        raise ValueError(
-            "Fichier .evtx binaire detecte mais python-evtx n'est pas "
-            "installe. Deux options : installer l'extra "
-            "(pip install 'netverdict[evtx]'), ou exporter en XML (zero "
-            "dependance) puis relancer netverdict sur le fichier XML : "
-            "wevtutil qe System /f:xml > events.xml  (canal en direct) ; "
-            "wevtutil qe C:\\chemin\\fichier.evtx /lf:true /f:xml > events.xml"
-            "  (canal sauvegarde / .evtx deja exporte)."
-        ) from exc
+        raise ValueError(t("err.evtx_no_lib", lang)) from exc
 
     events: list[TimelineEvent] = []
     try:
@@ -620,12 +611,14 @@ def _parse_binary(path: Path, stats: SourceStats) -> list[TimelineEvent]:
                 events.append(tev)
                 stats.parsed += 1
     except Exception as exc:
-        raise ValueError(f"Lecture du .evtx {path} interrompue : {exc}") from exc
+        raise ValueError(
+            t("err.evtx_read_interrupted", lang, path=path, e=exc)) from exc
 
     return events
 
 
-def parse(path: str | Path) -> tuple[list[TimelineEvent], SourceStats]:
+def parse(path: str | Path,
+          lang: str = DEFAULT_LANG) -> tuple[list[TimelineEvent], SourceStats]:
     """Point d'entree du contrat sources/*.py (voir timeline.py).
 
     Detecte le format par le contenu (magic .evtx) et non par l'extension,
@@ -640,9 +633,9 @@ def parse(path: str | Path) -> tuple[list[TimelineEvent], SourceStats]:
         head = f.read(8)
 
     if head == _EVTX_MAGIC:
-        events = _parse_binary(path, stats)
+        events = _parse_binary(path, stats, lang)
     else:
-        events = _parse_xml_file(path, stats)
+        events = _parse_xml_file(path, stats, lang)
 
     # Garde-fou constate sur machine reelle : `sysmon -i` SANS config
     # n'active pas NetworkConnect (EID3). Les events Sysmon se parsent alors
@@ -659,10 +652,7 @@ def parse(path: str | Path) -> tuple[list[TimelineEvent], SourceStats]:
     # sans lever et rendait ([], stats) — l'admin en concluait « rien ne s'est
     # passe » alors que sa source n'avait jamais ete lue.
     if not events:
-        stats.note = (
-            "aucun evenement lu dans ce fichier. S'il ne devait pas etre vide : "
-            "verifier l'export (canal, filtre de date, droits) — pour un .evtx "
-            "binaire, reexporter en XML avec  wevtutil qe <canal> /f:xml > events.xml")
+        stats.note = t("note.evtx_empty", lang)
     elif not any(e.connection is not None for e in events):
         # Deux sources possibles de connexion, deux verifications
         # INDEPENDANTES (sur le prefixe reel du message, pas sur une
@@ -671,22 +661,9 @@ def parse(path: str | Path) -> tuple[list[TimelineEvent], SourceStats]:
         # commande d'activation, melanger les deux induirait l'admin en erreur.
         notes: list[str] = []
         if any(e.message.startswith(_SYSMON_PROVIDER) for e in events):
-            notes.append(
-                "events Sysmon lus mais AUCUN NetworkConnect (EID3) : "
-                "l'attribution process<->flux ne peut pas fonctionner. "
-                "Activer : sysmon -c <chemin>\\netverdict\\capture\\"
-                "sysmon-netverdict.xml (console administrateur)")
+            notes.append(t("note.evtx_no_sysmon_eid3", lang))
         if any(e.message.startswith(_WFP_PROVIDER) for e in events):
-            notes.append(
-                "events de securite Windows lus mais AUCUN WFP 5156/5157 "
-                "(Filtering Platform Connection) : l'attribution "
-                "process<->flux ne peut pas fonctionner. Activer : "
-                'auditpol /set /subcategory:"Filtering Platform Connection" '
-                "/success:enable /failure:enable -- TRES verbeux (beaucoup "
-                "d'evenements sur une machine chargee) : a n'activer que le "
-                "temps du diagnostic, puis desactiver avec "
-                "auditpol /set /subcategory:\"Filtering Platform Connection\" "
-                "/success:disable /failure:disable")
+            notes.append(t("note.evtx_no_wfp", lang))
         stats.note = " ".join(notes)
 
     events.sort(key=lambda e: e.ts)

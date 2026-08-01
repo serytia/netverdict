@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from .i18n import DEFAULT_LANG, t
 from .signals import FlowSignals
 
 
@@ -37,21 +38,21 @@ class HostContext:
     mem_free_mb: Optional[float]
     process_cpu_pct: Optional[float]
 
-    def summary(self) -> str:
+    def summary(self, lang: str = DEFAULT_LANG) -> str:
         parts = []
         if self.process:
-            p = f"socket detenue par {self.process}"
+            p = t("host.socket_owner", lang, process=self.process)
             if self.pid:
-                p += f" (pid {self.pid})"
+                p += t("host.pid", lang, pid=self.pid)
             if self.process_cpu_pct is not None:
-                p += f", cpu process {self.process_cpu_pct:.0f}%"
+                p += t("host.process_cpu", lang, pct=self.process_cpu_pct)
             parts.append(p)
         if self.cpu_pct is not None:
-            parts.append(f"cpu machine {self.cpu_pct:.0f}%")
+            parts.append(t("host.cpu", lang, pct=self.cpu_pct))
         if self.disk_busy_pct is not None:
-            parts.append(f"disque {self.disk_busy_pct:.0f}%")
+            parts.append(t("host.disk", lang, pct=self.disk_busy_pct))
         if self.mem_free_mb is not None:
-            parts.append(f"ram libre {self.mem_free_mb:.0f} Mo")
+            parts.append(t("host.mem_free", lang, mb=self.mem_free_mb))
         return f"[{self.host}] " + ", ".join(parts) if parts else ""
 
 

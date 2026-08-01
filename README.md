@@ -132,9 +132,34 @@ netverdict capture --duration 60                  # Windows: pktmon (natif) / Li
 
 # Lister les regles de verdict
 netverdict rules
+
+# Sortie en anglais (defaut : francais). Disponible sur toutes les
+# sous-commandes, et via l'environnement pour ne pas la repeter :
+netverdict analyze capture.pcap --lang en
+export NETVERDICT_LANG=en                         # Windows : $env:NETVERDICT_LANG="en"
 ```
 
 Code retour : `0` = rien d'anormal, `1` = au moins un verdict, `2` = erreur.
+
+### Langue de la sortie
+
+`--lang {fr,en}` traduit **tout ce qu'un humain lit** : titres de verdict,
+preuves, pistes de correction, timeline, `--help`, messages d'erreur, et la
+langue demandee au modele par `--explain`. Le defaut reste `fr` ; `--lang`
+prime sur `$NETVERDICT_LANG`, qui prime sur le defaut.
+
+Ce que `--lang` ne change **jamais**, volontairement : les jetons de verdict
+(`RESEAU`, `APP`, `OS`, `HOTE`, `AMBIGU`, `RAS`), les valeurs de `confidence`
+et les cles du JSON. Ce sont des identifiants, pas de la prose : ils
+apparaissent dans les fichiers `--rules` et dans les scripts qui filtrent la
+sortie `--json`. Les traduire ferait casser un `verdict == "RESEAU"` le jour
+ou quelqu'un exporte `NETVERDICT_LANG=en` — sans le moindre message. Le
+libelle *affiche* en console suit la langue (`NETWORK`, `HOST`...), la donnee
+ne bouge pas.
+
+Les regles personnelles (`--rules mes-regles.yaml`) acceptent les champs
+freres `title_en` / `evidence_en` / `remediation_en`. Une regle sans
+traduction sort en francais quelle que soit la langue demandee, sans erreur.
 
 La capture assistee est **tronquee par defaut** (128 octets/paquet sous Windows,
 96 sous Linux) : suffisant pour l'analyse et leger.

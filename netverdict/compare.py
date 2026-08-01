@@ -37,6 +37,7 @@ from typing import Optional
 import dpkt
 
 from .flows import build_flows
+from .i18n import DEFAULT_LANG, t
 from .pcap import read_capture
 
 # Un segment est identifie par ce qui survit au transport de bout en bout :
@@ -82,8 +83,11 @@ class ComparaisonFlux:
     ecarts: list[Ecart] = field(default_factory=list)
     note: str = ""
 
-    def verdict(self) -> tuple[str, str]:
+    def verdict(self, lang: str = DEFAULT_LANG) -> tuple[str, str]:
         """(verdict, phrase) — le meme vocabulaire que le moteur de regles.
+
+        Le JETON de verdict ne suit PAS la langue (identifiant, comme dans le
+        moteur de regles) ; seule la phrase est traduite.
 
         On ne rend un verdict RESEAU que sur une perte MESUREE entre les deux
         points. Sans perte observee, on ne conclut pas « tout va bien » : on
@@ -92,20 +96,14 @@ class ComparaisonFlux:
         perdus = sum(e.perdus for e in self.ecarts)
         amont = sum(e.segments_amont for e in self.ecarts)
         if not amont:
-            return ("AMBIGU", "aucun segment appariable : captures trop "
-                              "courtes ou non simultanees")
+            return ("AMBIGU", t("compare.verdict_ambigu", lang))
         if perdus:
             detail = ", ".join(
-                f"{e.sens} : {e.perdus}/{e.segments_amont} perdus"
+                t("compare.verdict_reseau_detail", lang, sens=e.sens,
+                  perdus=e.perdus, amont=e.segments_amont)
                 for e in self.ecarts if e.perdus)
-            return ("RESEAU",
-                    f"des segments emis ne sont jamais arrives au second "
-                    f"point de capture ({detail}) — la perte se produit "
-                    f"ENTRE les deux points")
-        return ("RAS",
-                f"les {amont} segments emis ont tous ete retrouves au second "
-                f"point : le chemin ENTRE les deux points de capture est hors "
-                f"de cause (chercher au-dela du second point)")
+            return ("RESEAU", t("compare.verdict_reseau", lang, detail=detail))
+        return ("RAS", t("compare.verdict_ras", lang, n=amont))
 
 
 def _index_segments(flux) -> dict[tuple, list[float]]:
@@ -184,13 +182,14 @@ def estimer_horloges(idx_a: dict[tuple, list[float]],
 
 
 def comparer(chemin_a: str | Path, chemin_b: str | Path,
-             ) -> tuple[list[ComparaisonFlux], dict]:
+             lang: str = DEFAULT_LANG) -> tuple[list[ComparaisonFlux], dict]:
     """Compare deux captures du meme trafic. A = point AMONT (cote client).
 
     Retourne (comparaisons, diagnostic) ou diagnostic porte ce qui concerne
     les fichiers eux-memes (flux communs, suspicion de NAT...).
     """
-    cap_a, cap_b = read_capture(chemin_a), read_capture(chemin_b)
+    cap_a = read_capture(chemin_a, lang)
+    cap_b = read_capture(chemin_b, lang)
     flux_a = {CleFlux(f.client, f.cport, f.server, f.sport): f
               for f in build_flows(cap_a)}
     flux_b = {CleFlux(f.client, f.cport, f.server, f.sport): f
@@ -216,17 +215,12 @@ def comparer(chemin_a: str | Path, chemin_b: str | Path,
         comp = ComparaisonFlux(cle=cle, offset_horloge_s=offset,
                                latence_reseau_ms=latence)
         if offset is None:
-            comp.note = ("handshake absent d'au moins une des captures : "
-                         "decalage d'horloge non estimable, aucune latence "
-                         "n'est donnee (les comptages restent valables)")
+            comp.note = t("compare.note_no_handshake", lang)
         elif latence is not None and latence < 0:
-            comp.note = ("latence estimee negative : les deux sens du chemin "
-                         "n'ont pas la meme duree (routage asymetrique) ou "
-                         "une horloge a saute pendant la capture — traiter la "
-                         "latence comme indicative")
+            comp.note = t("compare.note_negative_latency", lang)
 
-        for sens, libelle in (("c2s", "client->serveur"),
-                              ("s2c", "serveur->client")):
+        for sens, libelle in (("c2s", t("compare.dir_c2s", lang)),
+                              ("s2c", t("compare.dir_s2c", lang))):
             # Chaque sens est mesure depuis SON emetteur : les paquets
             # client->serveur sont vus en premier par A, et inversement.
             amont, aval = (idx_a, idx_b) if sens == "c2s" else (idx_b, idx_a)

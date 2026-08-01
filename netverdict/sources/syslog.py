@@ -20,6 +20,7 @@ from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 from typing import Optional
 
+from ..i18n import DEFAULT_LANG, t
 from ..timeline import SourceStats, TimelineEvent
 
 # --------------------------------------------------------------------------
@@ -82,7 +83,7 @@ _FUTURE_SLACK = timedelta(hours=26)
 _OFFSET_RE = re.compile(r"^(?P<sign>[+-])(?P<h>\d{1,2})(?::?(?P<m>\d{2}))?$")
 
 
-def parse_tz(spec: str) -> tzinfo:
+def parse_tz(spec: str, lang: str = DEFAULT_LANG) -> tzinfo:
     """Convertit une specification de fuseau en tzinfo.
 
     Trois formes acceptees, de la plus portable a la plus juste :
@@ -99,7 +100,7 @@ def parse_tz(spec: str) -> tzinfo:
     """
     spec = (spec or "").strip()
     if not spec:
-        raise ValueError("--syslog-tz vide")
+        raise ValueError(t("err.tz_empty", lang))
     if spec.upper() in {"UTC", "Z", "GMT"}:
         return timezone.utc
 
@@ -108,8 +109,7 @@ def parse_tz(spec: str) -> tzinfo:
         hours = int(m.group("h"))
         minutes = int(m.group("m") or 0)
         if hours > 23 or minutes > 59:
-            raise ValueError(
-                f"decalage hors bornes: {spec!r} (attendu entre -23:59 et +23:59)")
+            raise ValueError(t("err.tz_out_of_range", lang, spec=spec))
         delta = timedelta(hours=hours, minutes=minutes)
         if m.group("sign") == "-":
             delta = -delta
@@ -129,21 +129,17 @@ def parse_tz(spec: str) -> tzinfo:
         except Exception:
             base_disponible = False
 
-        formes = ("Formes acceptees : 'UTC', un nom IANA (Europe/Paris), "
-                  "ou un decalage fixe (+02:00). Attention, un decalage fixe "
-                  "est faux de part et d'autre d'un changement d'heure.")
+        formes = t("err.tz_forms", lang)
         if base_disponible or "/" not in spec:
             # Base presente, ou chaine qui ne ressemble pas a un nom IANA
             # (les noms de zones contiennent quasi toujours un '/').
-            raise ValueError(f"fuseau inconnu: {spec!r}. {formes}") from exc
+            raise ValueError(
+                t("err.tz_unknown", lang, spec=spec, formes=formes)) from exc
         raise ValueError(
-            f"fuseau {spec!r} introuvable : la base de fuseaux IANA n'est pas "
-            "installee (cas de Windows, qui n'en fournit pas). Corriger avec "
-            f"'pip install tzdata'. {formes}"
-        ) from exc
+            t("err.tz_no_database", lang, spec=spec, formes=formes)) from exc
     except (ValueError, OSError) as exc:
         # Nom syntaxiquement invalide (chemin absolu, caracteres interdits).
-        raise ValueError(f"fuseau invalide: {spec!r} ({exc})") from exc
+        raise ValueError(t("err.tz_invalid", lang, spec=spec, e=exc)) from exc
 
 
 def _nil(value: str) -> str:
@@ -397,7 +393,8 @@ def _parse_rfc3164_nopri(line: str, now: Optional[datetime] = None,
 
 def parse(path: str | Path,
           now: Optional[datetime] = None,
-          tz: Optional[tzinfo] = None) -> tuple[list[TimelineEvent], SourceStats]:
+          tz: Optional[tzinfo] = None,
+          lang: str = DEFAULT_LANG) -> tuple[list[TimelineEvent], SourceStats]:
     """Lit un fichier syslog plat (formats melanges, ligne par ligne).
 
     Chaque ligne est essayee dans l'ordre a) RFC5424, b) RFC3164 avec PRI,
@@ -428,7 +425,7 @@ def parse(path: str | Path,
         # la ligne corrompue ne matchera aucun format et sera comptee.
         text = p.read_text(encoding="utf-8", errors="replace")
     except OSError as exc:
-        raise ValueError(f"syslog illisible ({p}): {exc}") from exc
+        raise ValueError(t("err.syslog_unreadable", lang, path=p, e=exc)) from exc
 
     now = now or datetime.now()
     events: list[TimelineEvent] = []

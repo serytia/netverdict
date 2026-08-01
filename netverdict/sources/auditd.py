@@ -94,6 +94,7 @@ import socket
 from pathlib import Path
 from typing import Optional
 
+from ..i18n import DEFAULT_LANG, t
 from ..timeline import ConnectionInfo, SourceStats, TimelineEvent
 
 # Documentation uniquement (voir piege plus haut) : jamais utilise comme
@@ -211,7 +212,8 @@ def _connection_from(fields: dict[str, str], dst_ip: str, dst_port: int) -> Conn
     )
 
 
-def parse(path: str | Path) -> tuple[list[TimelineEvent], SourceStats]:
+def parse(path: str | Path,
+          lang: str = DEFAULT_LANG) -> tuple[list[TimelineEvent], SourceStats]:
     """Point d'entree du contrat sources/*.py (voir timeline.py).
 
     Deux passes sur le fichier : la premiere indexe chaque record SYSCALL et
@@ -225,9 +227,7 @@ def parse(path: str | Path) -> tuple[list[TimelineEvent], SourceStats]:
         text = p.read_text(encoding="utf-8", errors="replace")
     except OSError as exc:
         raise ValueError(
-            f"audit.log illisible ({p}) : {exc}. Verifier le chemin et les "
-            "permissions (souvent 0640 root:adm sur /var/log/audit/audit.log)."
-        ) from exc
+            t("err.auditd_unreadable", lang, path=p, e=exc)) from exc
 
     stats = SourceStats()
     saw_valid_record = False
@@ -309,12 +309,7 @@ def parse(path: str | Path) -> tuple[list[TimelineEvent], SourceStats]:
     # n'en est sortie -- cas reel ou auditd tourne sans regle sur connect().
     # Critere semantique (zero event produit), jamais syntaxique.
     if saw_valid_record and not events:
-        stats.note = (
-            "records auditd lus mais aucune connexion reseau (SYSCALL "
-            "connect() + SOCKADDR) : la regle d'audit n'est probablement "
-            "pas chargee. Activer : auditctl -a always,exit -F arch=b64 "
-            "-S connect -k netverdict_connect  (a rendre persistant dans "
-            "/etc/audit/rules.d/, sinon la regle disparait au redemarrage)")
+        stats.note = t("note.auditd_no_connection", lang)
 
     events.sort(key=lambda e: e.ts)
     return events, stats

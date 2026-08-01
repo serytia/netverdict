@@ -30,6 +30,7 @@ classifiers = [
     "Topic :: System :: Systems Administration",
     "Topic :: Security",
     "Natural Language :: French",
+    "Natural Language :: English",
 ]
 
 dependencies = [

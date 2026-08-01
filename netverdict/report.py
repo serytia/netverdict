@@ -15,6 +15,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
 
+from .i18n import DEFAULT_LANG, t
 from .pcap import Capture
 from .rules.engine import FlowVerdict
 from .hostsnap import HostSnapshot
@@ -29,8 +30,25 @@ VERDICT_STYLE = {
     "RAS": "bold green",
 }
 
-CONF_LABEL = {"haute": "confiance haute", "moyenne": "confiance moyenne",
-              "basse": "confiance basse"}
+
+def verdict_label(verdict: str, lang: str = DEFAULT_LANG) -> str:
+    """Etiquette AFFICHEE d'un jeton de verdict.
+
+    Le jeton (RESEAU, HOTE...) reste identique dans le YAML, le JSON et le code
+    de retour : c'est un identifiant. Seule cette etiquette suit la langue —
+    sinon un script qui teste `verdict == "RESEAU"` casserait en silence des
+    qu'on change de langue (voir i18n.py)."""
+    return t(f"verdict.{verdict}", lang)
+
+
+def conf_label(confidence: str, lang: str = DEFAULT_LANG) -> str:
+    """Idem pour `confidence`. Une valeur sans etiquette dans cette langue sort
+    TELLE QUELLE : c'est le comportement historique de `faible` cote francais
+    (jamais traduit depuis la v1), et une regle utilisateur peut de toute facon
+    inventer sa propre valeur."""
+    cle = f"conf.{confidence}"
+    libelle = t(cle, lang)
+    return confidence if libelle == cle else libelle
 
 
 def _sort_key(fv: FlowVerdict) -> tuple:
@@ -60,7 +78,8 @@ def _fmt_ts(ts: float, tz_known: bool) -> str:
 
 
 def render_timeline(tl: Timeline, incident_ts: Optional[float],
-                    con: Console, windowed: bool, top: int = 10) -> None:
+                    con: Console, windowed: bool, top: int = 10,
+                    lang: str = DEFAULT_LANG) -> None:
     """Section « qu'est-ce qui a change » : les changements d'infra de la
     fenetre, les plus recents d'abord. On TRIE par pertinence, on ne conclut
     pas a la causalite — un changement qui precede l'incident est un suspect
@@ -70,17 +89,12 @@ def render_timeline(tl: Timeline, incident_ts: Optional[float],
     vide : le silence est le pire des rapports quand l'admin a donne des
     logs a lire (il conclurait « rien n'a change » au lieu de « rien n'a
     ete retenu/lu »)."""
-    if windowed:
-        con.print(Text("Changements dans l'infra (fenetre de la capture) :",
-                       style="bold"))
-    else:
-        con.print(Text("Changements dans l'infra — fenetre NON appliquee "
-                       "(capture sans paquet TCP date) :", style="bold"))
+    entete = ("timeline.header_windowed" if windowed
+              else "timeline.header_unwindowed")
+    con.print(Text(t(entete, lang), style="bold"))
     changes = tl.changes()
     if not changes:
-        con.print(Text("  aucun changement detecte dans la fenetre — les "
-                       "sources fournies n'expliquent pas l'incident par un "
-                       "changement recent", style="dim"))
+        con.print(Text("  " + t("timeline.no_change", lang), style="dim"))
     for e in changes[:top]:
         line = Text()
         line.append(f"  {_fmt_ts(e.ts, e.tz_known)}  ")
@@ -93,28 +107,29 @@ def render_timeline(tl: Timeline, incident_ts: Optional[float],
         if incident_ts is not None and 0 <= incident_ts - e.ts <= 300:
             delta = incident_ts - e.ts
             if e.tz_known:
-                line.append(f"  << precede l'incident de {delta:.0f}s",
+                line.append(t("timeline.precedes", lang, delta=delta),
                             style="bold yellow")
             else:
-                line.append(f"  << precede l'incident d'environ "
-                            f"{max(1, round(delta / 60)):.0f} min (heure "
-                            f"source approximative)", style="bold yellow")
+                line.append(t("timeline.precedes_approx", lang,
+                              delta=max(1, round(delta / 60))),
+                            style="bold yellow")
         con.print(line)
     if len(changes) > top:
-        con.print(Text(f"  ... {len(changes) - top} autre(s) changement(s) "
-                       f"masque(s) — --top pour en voir plus", style="dim"))
+        con.print(Text("  " + t("timeline.more_changes", lang,
+                                n=len(changes) - top), style="dim"))
     # O(n) par categorie — jamais de comparaison d'objets sur les listes
     # completes (quadratique sur un gros syslog central).
     from .timeline import CHANGE_CATEGORIES
     errors = sum(1 for e in tl.events
                  if e.category not in CHANGE_CATEGORIES and e.severity >= 2)
     if errors:
-        con.print(Text(f"  + {errors} erreur(s) hors changement dans "
-                       f"la fenetre (--json pour le detail)", style="dim"))
+        con.print(Text("  " + t("timeline.other_errors", lang, n=errors),
+                       style="dim"))
     for name, st in tl.stats.items():
-        note = f"{st.parsed}/{st.total_lines} entrees lues"
+        note = t("timeline.entries_read", lang, parsed=st.parsed,
+                 total=st.total_lines)
         if st.unparsed:
-            note += f", {st.unparsed} illisibles"
+            note += t("timeline.entries_unreadable", lang, n=st.unparsed)
         con.print(Text(f"  {name}: {note}", style="dim"))
         if st.note:
             # Avertissement actionnable du parseur : en evidence, pas en dim —
@@ -126,7 +141,8 @@ def render_timeline(tl: Timeline, incident_ts: Optional[float],
 def render_console(cap: Capture, verdicts: list[FlowVerdict],
                    snapshot: Optional[HostSnapshot] = None,
                    top: int = 10, console: Optional[Console] = None,
-                   timeline: Optional[Timeline] = None) -> None:
+                   timeline: Optional[Timeline] = None,
+                   lang: str = DEFAULT_LANG) -> None:
     con = console or Console()
     st = cap.stats
     # Suspects rattaches a chaque flux. Indexe par position dans `verdicts`,
@@ -138,26 +154,20 @@ def render_console(cap: Capture, verdicts: list[FlowVerdict],
     position_de = {id(fv): i for i, fv in enumerate(verdicts)}
 
     con.print()
-    header = (f"{st.total} paquets lus — {st.tcp} TCP, {st.icmp} ICMP, "
-              f"{st.non_ip} non-IP, {st.parse_errors} illisibles — "
-              f"{len(verdicts)} conversations")
-    con.print(Text(header, style="dim"))
+    con.print(Text(t("report.header", lang, total=st.total, tcp=st.tcp,
+                     icmp=st.icmp, non_ip=st.non_ip, errors=st.parse_errors,
+                     flows=len(verdicts)), style="dim"))
     # Honnetete de la mesure : une capture largement illisible ou tronquee
     # doit se voir AVANT les verdicts qu'elle affaiblit.
     if st.total and st.parse_errors / st.total > 0.05:
-        con.print(Text(f"attention : {st.parse_errors}/{st.total} paquets "
-                       f"illisibles, les verdicts peuvent etre incomplets",
+        con.print(Text(t("report.warn_parse_errors", lang,
+                         errors=st.parse_errors, total=st.total),
                        style="bold red"))
     if st.unsupported_linktype:
-        con.print(Text("attention : linktype partiellement supporte, "
-                       "des trames ont ete ignorees", style="bold red"))
+        con.print(Text(t("report.warn_linktype", lang), style="bold red"))
     if st.mixed_linktypes:
-        con.print(Text(
-            "ATTENTION : cette capture declare PLUSIEURS interfaces de types "
-            "differents (fusion type mergecap). Seul le type de la premiere "
-            "est applique : les paquets des autres sont comptes « non-IP » et "
-            "N'APPARAISSENT PAS dans les verdicts. Analyser chaque capture "
-            "separement.", style="bold red"))
+        con.print(Text(t("report.warn_mixed_linktypes", lang),
+                       style="bold red"))
 
     ordered = sorted(verdicts, key=_sort_key)
     shown = 0
@@ -179,42 +189,43 @@ def render_console(cap: Capture, verdicts: list[FlowVerdict],
         style = VERDICT_STYLE.get(m.verdict, "bold")
 
         body = Text()
-        body.append(f"{m.rule.title}\n", style="bold")
+        body.append(f"{m.title}\n", style="bold")
         for ev in m.evidence:
             body.append(f"  * {ev}\n")
         if snapshot:
             ctx = snapshot.context_for(s)
-            if ctx and ctx.summary():
-                body.append(f"  * etat hote : {ctx.summary()}\n", style="cyan")
+            if ctx and ctx.summary(lang):
+                body.append(f"  * {t('report.host_state', lang)}"
+                            f"{ctx.summary(lang)}\n", style="cyan")
         # Attribution RETROACTIVE : contrairement au snapshot, elle retrouve
         # aussi un process deja mort a la fin de la capture.
         attr = process_par_flux.get(position_de.get(id(fv), -1))
         if attr:
-            body.append(f"  * process (journal, retroactif) : "
-                        f"{attr.describe()}\n", style="cyan")
+            body.append(f"  * {t('report.process_retro', lang)}"
+                        f"{attr.describe(lang)}\n", style="cyan")
         if not s.direction_confident:
-            body.append("  * sens client/serveur estime (pas de SYN dans la "
-                        "capture) : lire les roles avec prudence\n", style="dim")
+            body.append(f"  * {t('report.direction_unsure', lang)}\n",
+                        style="dim")
         # Changements d'infra rattaches a CE flux. Place avant la piste de
         # correction : c'est souvent la reponse la plus rapide, et c'est la
         # que l'admin regarde. Vocabulaire du SOUPCON, jamais de la cause.
         mes_suspects = suspects_par_flux.get(position_de.get(id(fv), -1), [])
         if mes_suspects:
-            body.append("\nA verifier en premier (suspects, pas une cause "
-                        "etablie) :\n", style="bold")
+            body.append(f"\n{t('report.suspects_header', lang)}\n",
+                        style="bold")
             for sp in mes_suspects:
                 e = sp.event
                 marque = "*" if sp.affinity else "-"
                 body.append(f"  {marque} {_fmt_ts(e.ts, e.tz_known)} "
                             f"[{e.category}] {e.host} — {e.message} "
-                            f"({sp.describe()})\n",
+                            f"({sp.describe(lang)})\n",
                             style="yellow" if sp.affinity else "")
             if any(sp.affinity for sp in mes_suspects):
-                body.append("    * = type de changement pouvant produire ce "
-                            "verdict\n", style="dim")
+                body.append(f"    {t('report.suspects_legend', lang)}\n",
+                            style="dim")
 
         if m.remediation:
-            body.append("\nPiste de correction :\n", style="bold")
+            body.append(f"\n{t('report.fix_header', lang)}\n", style="bold")
             for line in m.remediation.splitlines():
                 body.append(f"  {line}\n")
         # Une regle RAS n'est jamais listee en signal secondaire : son titre
@@ -226,16 +237,16 @@ def render_console(cap: Capture, verdicts: list[FlowVerdict],
         # porte aussi le verdict faisant autorite.
         secondary = [x for x in fv.matches[1:] if x.verdict != "RAS"]
         if secondary:
-            body.append("\nSignaux secondaires : ", style="dim")
-            body.append(", ".join(f"{x.rule.id} ({x.verdict})"
-                                  for x in secondary), style="dim")
+            body.append(f"\n{t('report.secondary', lang)}", style="dim")
+            body.append(", ".join(
+                f"{x.rule.id} ({verdict_label(x.verdict, lang)})"
+                for x in secondary), style="dim")
             body.append("\n")
 
         title = Text()
-        title.append(f" {m.verdict} ", style=style)
+        title.append(f" {verdict_label(m.verdict, lang)} ", style=style)
         title.append(f"— {s.client}:{s.cport} -> {s.server}:{s.sport} ")
-        title.append(f"[{CONF_LABEL.get(m.rule.confidence, m.rule.confidence)}]",
-                     style="dim")
+        title.append(f"[{conf_label(m.rule.confidence, lang)}]", style="dim")
         con.print(Panel(body, title=title, border_style=style.split()[-1]))
 
     if timeline is not None:
@@ -246,26 +257,31 @@ def render_console(cap: Capture, verdicts: list[FlowVerdict],
                           default=None)
         con.print()
         render_timeline(timeline, incident_ts, con,
-                        windowed=timeline.windowed, top=top)
+                        windowed=timeline.windowed, top=top, lang=lang)
 
     hidden = sum(1 for fv in ordered
                  if fv.primary and fv.verdict != "RAS") - shown
     if hidden > 0:
-        con.print(Text(f"... {hidden} autre(s) conversation(s) avec verdict "
-                       f"masquee(s) — utiliser --top pour en voir plus",
-                       style="dim"))
+        con.print(Text(t("report.hidden_flows", lang, n=hidden), style="dim"))
     if ras_flows:
-        con.print(Text(f"[RAS] {len(ras_flows)} conversation(s) au transport "
-                       f"sain", style="green"))
+        con.print(Text(t("report.healthy_flows", lang,
+                         label=verdict_label("RAS", lang), n=len(ras_flows)),
+                       style="green"))
     if silent:
-        con.print(Text(f"{silent} conversation(s) anodine(s) (trop peu de "
-                       f"trafic pour juger)", style="dim"))
+        con.print(Text(t("report.silent_flows", lang, n=silent), style="dim"))
     con.print()
 
 
 def to_json(cap: Capture, verdicts: list[FlowVerdict],
             snapshot: Optional[HostSnapshot] = None,
-            timeline: Optional[Timeline] = None) -> str:
+            timeline: Optional[Timeline] = None,
+            lang: str = DEFAULT_LANG) -> str:
+    """Rapport machine.
+
+    Les CLES et les JETONS (verdict, confidence, side) ne suivent PAS la
+    langue : un script qui filtre sur `verdict == "RESEAU"` doit continuer a
+    marcher quelle que soit --lang. Seule la PROSE (title, evidence,
+    remediation) est localisee — c'est aussi elle que --explain relit."""
     st = cap.stats
     from .correlate import attributions, correlate
     suspects_par_flux = correlate(verdicts, timeline)
@@ -289,7 +305,7 @@ def to_json(cap: Capture, verdicts: list[FlowVerdict],
                 "verdict": m.verdict,
                 "priority": m.rule.priority,
                 "confidence": m.rule.confidence,
-                "title": m.rule.title,
+                "title": m.title,
                 "evidence": m.evidence,
                 "remediation": m.remediation,
             } for m in fv.matches],
