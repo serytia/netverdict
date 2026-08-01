@@ -11,6 +11,13 @@
 #            | AMBIGU | RAS
 # Priorite : plus haut = affiche en premier ; les autres matches restent
 #            visibles comme signaux secondaires.
+#
+# TRADUCTIONS : `title`/`evidence`/`remediation` portent le francais ;
+# `title_en`/`evidence_en`/`remediation_en` portent l'anglais. Un champ _en
+# absent retombe sur le francais (aucune erreur). Les accolades d'un gabarit
+# `evidence` doivent etre IDENTIQUES dans les deux langues : load_rules eprouve
+# les deux, une faute de frappe explose au chargement.
+# `verdict` et `confidence` ne se traduisent PAS : ce sont des identifiants.
 
 rules:
 
@@ -31,6 +38,15 @@ rules:
       est sur CET equipement. Chercher dans sa configuration la regle qui
       matche ce couple source/destination/port, et verifier si le refus est
       voulu (durcissement recent ?) ou une regle trop large.
+    title_en: "Connection explicitly REFUSED by a device (REJECT)"
+    evidence_en:
+      - "ICMP administratively-prohibited sent by {icmp_admin_prohibited_from} for {client}:{cport} -> {server}:{sport}"
+    remediation_en: |
+      Device {icmp_admin_prohibited_from} is refusing this traffic by policy
+      (REJECT). This is neither the application nor the server: the filtering
+      rule lives on THAT device. Find the rule matching this
+      source/destination/port triple in its configuration, and check whether
+      the refusal is intended (recent hardening?) or a rule that is too broad.
 
   # SYN sans SYN/ACK, mais avec des ICMP unreachable rattaches. Situation
   # DIFFERENTE du silence complet : un equipement ou l'hote a explicitement
@@ -61,6 +77,19 @@ rules:
       3. Si l'emetteur est {server} lui-meme : l'hote est la mais le port ou le
          protocole est ferme au niveau IP (host/port unreachable).
       4. Verifier la resolution/ARP du dernier saut avant {server}.
+    title_en: "SYN unanswered, but ICMP unreachable received: destination reported as unreachable"
+    evidence_en:
+      - "{syn_count} SYN from {client} to {server}:{sport} spread over {syn_span_s:.1f}s — no SYN/ACK, but {icmp_unreach_count} ICMP unreachable attached to the flow"
+    remediation_en: |
+      Unlike a silent DROP, something DID answer: an ICMP unreachable. That
+      narrows the field a lot:
+      1. Read the exact ICMP type/code and its sender (--json): the sender is
+         the device or host declaring the destination unreachable.
+      2. If the sender is a router: missing route or a downstream interface
+         that is down.
+      3. If the sender is {server} itself: the host is up, but the port or the
+         protocol is closed at IP level (host/port unreachable).
+      4. Check name resolution/ARP on the last hop before {server}.
 
   - id: syn-no-answer
     verdict: RESEAU
@@ -93,6 +122,18 @@ rules:
          part ailleurs) — verifier la table de routage cote serveur
       4. L'hote repond-il a autre chose (ICMP, autre port) ? Si non : probleme
          de joignabilite (down, ARP, VLAN), pas de filtrage.
+    title_en: "SYN with no answer at all: silent filtering (DROP) or unreachable host"
+    evidence_en:
+      - "{syn_count} SYN from {client} to {server}:{sport} spread over {syn_span_s:.1f}s — no SYN/ACK, no RST, no ICMP"
+    remediation_en: |
+      Something on the path is dropping the SYN without answering (DROP
+      policy), or the host is unreachable. Check in this order:
+      1. Local firewall on {server} (active profile, inbound rule on port {sport})
+      2. Intermediate firewalls/ACLs on the forward path
+      3. RETURN route from {server} (asymmetry: the request gets through, the
+         reply leaves elsewhere) — check the routing table on the server side
+      4. Does the host answer anything else (ICMP, another port)? If not, this
+         is a reachability problem (down, ARP, VLAN), not filtering.
 
   - id: rst-to-syn
     verdict: APP
@@ -113,6 +154,18 @@ rules:
          est le classique du genre)
       3. Un RST peut aussi venir d'un firewall en mode reject-with-rst :
          si le service ecoute bel et bien, chercher un REJECT sur le chemin.
+    title_en: "RST in reply to the SYN: nothing is listening on that port"
+    evidence_en:
+      - "RST received {rst_to_syn_ms:.1f} ms after the SYN to {server}:{sport}"
+    remediation_en: |
+      The network works: the SYN arrived and a TCP stack answered. But no
+      service is listening on {server}:{sport}. On the server, check:
+      1. Is the service running? (process/service state)
+      2. Is it listening on the right port and the right interface?
+         (ss -tlnp / netstat -ano — a bind on 127.0.0.1 instead of 0.0.0.0
+         is the classic case)
+      3. A RST can also come from a firewall in reject-with-rst mode: if the
+         service really is listening, look for a REJECT on the path.
 
   - id: mtu-blackhole
     verdict: RESEAU
@@ -130,6 +183,15 @@ rules:
       s'etablit, les petits echanges marchent, tout gele des qu'un gros
       transfert demarre. Corriger par clamp du MSS sur l'equipement de tunnel
       (ex : 1360 pour de l'IPsec) ou MTU coherente de bout en bout.
+    title_en: "MTU problem on the path (fragmentation needed)"
+    evidence_en:
+      - "ICMP 'fragmentation needed' received for flow {client}:{cport} -> {server}:{sport}"
+    remediation_en: |
+      A link on the path has a smaller MTU (VPN tunnel, PPPoE, IPsec...) and
+      large segments do not get through. Typical symptom: the connection is
+      established, small exchanges work, and everything freezes as soon as a
+      large transfer starts. Fix it by clamping the MSS on the tunnel device
+      (e.g. 1360 for IPsec) or by using a consistent MTU end to end.
 
   - id: zero-window-server
     verdict: HOTE
@@ -160,6 +222,18 @@ rules:
          arrete de lire sa socket)
       3. Swap / pression memoire.
       Le snapshot hote de 'netverdict capture' donne exactement ces elements.
+    title_en: "The server has stopped reading its socket (zero window): saturated app or OS"
+    evidence_en:
+      - "{zw_from_server} zero-window advertisements from {server}, window closed for up to {zw_max_ms_from_server:.0f} ms (total {zw_total_ms_from_server:.0f} ms)"
+    remediation_en: |
+      THE NETWORK IS NOT AT FAULT: it delivered, and {server} is not
+      consuming. The service is not reading its socket fast enough. On the
+      server side, at the time of the incident, check:
+      1. CPU of the process holding port {sport} (blocked thread? GC?)
+      2. Disk I/O (an app writing synchronously to a saturated disk stops
+         reading its socket)
+      3. Swap / memory pressure.
+      The host snapshot from 'netverdict capture' gives exactly these figures.
 
   - id: slow-app-proven
     verdict: APP
@@ -190,6 +264,16 @@ rules:
       2. Dependances aval : base de donnees, API tierce, resolution DNS
          faite PAR le serveur — le blocage est souvent un cran derriere
       3. Pool de threads/connexions epuise (requetes en file d'attente).
+    title_en: "Slow application response, reception proven by a fast ACK"
+    evidence_en:
+      - "{exchanges} exchanges: server ACK in {server_ack_delay_ms_p95:.0f} ms but response in {ttfb_ms_p50:.0f} ms (p50) / {ttfb_ms_p95:.0f} ms (p95), 0 loss"
+    remediation_en: |
+      The network delivered the request (immediate ACK) and then waited for
+      the application. Look on the APPLICATION SIDE of {server}:{sport}:
+      1. Internal processing time (application logs at the same timestamp)
+      2. Downstream dependencies: database, third-party API, DNS resolution
+         done BY the server — the stall is often one hop further back
+      3. Exhausted thread/connection pool (requests queuing up).
 
   - id: zero-window-client
     verdict: HOTE
@@ -208,6 +292,14 @@ rules:
       (application cliente bloquee, machine saturee). Le reseau et le serveur
       sont hors de cause. Verifier la charge du poste {client} et l'etat de
       l'application au moment des plaintes.
+    title_en: "The client has stopped reading its socket (zero window): saturated workstation or client app"
+    evidence_en:
+      - "{zw_from_client} zero-window advertisements from {client}, window closed for up to {zw_max_ms_from_client:.0f} ms"
+    remediation_en: |
+      It is the CLIENT WORKSTATION that is not absorbing what the server
+      sends (blocked client application, saturated machine). Neither the
+      network nor the server is at fault. Check the load on {client} and the
+      state of the application at the time of the complaints.
 
   - id: retrans-heavy
     verdict: RESEAU
@@ -233,6 +325,19 @@ rules:
          duplex mismatch, cable/SFP fatigue
       3. Wi-Fi ou lien radio dans le chemin
       4. Equipement qui drop en limite de capacite (CPU firewall, QoS).
+    title_en: "Significant packet loss on the path"
+    evidence_en:
+      - "{retrans_total} retransmissions out of {pkts_total} packets ({retrans_rate:.1%}) — c2s: {retrans_c2s}, s2c: {retrans_s2c}"
+      - "Dup-ACK bursts: client {dup_ack_bursts_from_client}, server {dup_ack_bursts_from_server}"
+    remediation_en: |
+      There is loss on the path. The direction of the retransmissions says
+      where to look (c2s = loss towards the server, s2c = loss towards the
+      client). Usual causes, most frequent first:
+      1. Saturated link (uplink, interconnect): check interface utilisation
+      2. Physical errors: CRC/error counters on the switches along the path,
+         duplex mismatch, worn cable/SFP
+      3. Wi-Fi or a radio link on the path
+      4. A device dropping at its capacity limit (firewall CPU, QoS).
 
   - id: slow-app-likely
     verdict: APP
@@ -257,6 +362,15 @@ rules:
       probabilite en preuve : recapturer COTE SERVEUR ('netverdict capture'
       sur le serveur) — si le delai y est identique, c'est l'app ; s'il
       disparait, chercher entre les deux points de capture.
+    title_en: "Slow application response (no separate ACK to prove it)"
+    evidence_en:
+      - "{exchanges} exchanges, response in {ttfb_ms_p50:.0f} ms (p50) / {ttfb_ms_p95:.0f} ms (p95), clean transport (0 loss, RTT p50 {rtt_ms_p50:.1f} ms)"
+    remediation_en: |
+      Transport is clean (no loss, stable RTT) but the response is slow: the
+      most likely cause is the application. To turn that probability into
+      proof, re-capture ON THE SERVER SIDE ('netverdict capture' on the
+      server) — if the delay is the same there, it is the app; if it
+      disappears, look between the two capture points.
 
   - id: rtt-degraded
     verdict: RESEAU
@@ -290,6 +404,14 @@ rules:
       files d'attente qui se remplissent (congestion, bufferbloat), lien
       partage sature par un autre trafic, ou equipement en limite CPU.
       Croiser l'horaire des pics avec les graphes d'utilisation des liens.
+    title_en: "Unstable latency: heavy jitter (congestion likely)"
+    evidence_en:
+      - "RTT min {rtt_ms_min:.1f} ms but p95 {rtt_ms_p95:.1f} ms (x{rtt_ratio_p95_min:.0f}) over {pkts_total} packets"
+    remediation_en: |
+      The path exists and works, but its latency spikes at times: queues
+      filling up (congestion, bufferbloat), a shared link saturated by other
+      traffic, or a device at its CPU limit. Cross-check the timing of the
+      spikes against link utilisation graphs.
 
   - id: rst-midstream
     verdict: AMBIGU
@@ -311,6 +433,19 @@ rules:
       3. Crash ou restart du process en face (logs systeme/app du cote qui
          a emis le RST).
       Le cote emetteur du RST ({rst_emitter}) dit ou commencer.
+    title_en: "Session cut short (RST) while it was working"
+    evidence_en:
+      - "RST sent by {rst_emitter} after established exchanges ({bytes_c2s}B c2s / {bytes_s2c}B s2c, duration {duration_s:.1f}s)"
+    remediation_en: |
+      A working session was killed. Three families of causes:
+      1. Idle timeout on a stateful device (firewall, NAT, LB): typical if
+         the cut happens after a quiet period — compare the idle duration
+         with the configured timeouts
+      2. IPS/inspection that decided to cut (check its logs at that exact
+         timestamp)
+      3. Crash or restart of the process on the other end (system/app logs on
+         the side that sent the RST).
+      The side that sent the RST ({rst_emitter}) says where to start.
 
   - id: latency-tail-unexplained
     verdict: AMBIGU
@@ -359,6 +494,28 @@ rules:
          meme chemin : gigue partagee = chemin.
 
       Ne PAS ouvrir de ticket operateur sur ce seul element.
+    title_en: "Latency spikes the capture cannot attribute"
+    evidence_en:
+      - "Median RTT {rtt_ms_p50:.1f} ms but p95 {rtt_ms_p95:.1f} ms (x{rtt_ratio_p95_p50:.0f}): latency spikes without the capture being able to say why"
+    remediation_en: |
+      TWO CAUSES produce exactly this signature and this capture CANNOT
+      separate them — hence an ambiguous verdict rather than a network
+      diagnosis that would have a one-in-two chance of being wrong:
+
+      1. PATH JITTER (queues, shared link, device at its limit).
+      2. DELAYED ACK on the receiver: a timer of 40 ms (Linux) to 200 ms
+         (Windows) holds back pure ACKs. The path is then not at fault.
+
+      TO DECIDE, in order of cost:
+      1. A 60 s `ping -i 0.2` towards {server} during the incident: if the
+         jitter also shows up in ICMP, it is the path. Otherwise it is the
+         timer.
+      2. In the capture, check whether the long RTTs are carried by PURE ACKs
+         (no data): that is the delayed-ACK signature.
+      3. Compare with another flow to a different destination over the same
+         path: shared jitter = the path.
+
+      Do NOT open a carrier ticket on this evidence alone.
 
   - id: clean
     verdict: RAS
@@ -396,3 +553,12 @@ rules:
       applicatives, contenu, authentification) ou sur un AUTRE flux que
       celui-ci (dependance cachee : DNS, proxy, service tiers) — verifier
       les autres conversations de la capture.
+    title_en: "Healthy transport: the problem is not in this network conversation"
+    evidence_en:
+      - "Handshake {handshake_rtt_ms:.1f} ms, {pkts_total} pkts, loss {retrans_rate:.2%}, TTFB p95 {ttfb_ms_p95:.0f} ms"
+    remediation_en: |
+      Nothing abnormal at transport level on this flow. If the user is still
+      complaining, the problem is above TCP (application-level HTTP errors,
+      content, authentication) or on ANOTHER flow than this one (hidden
+      dependency: DNS, proxy, third-party service) — check the other
+      conversations in the capture.

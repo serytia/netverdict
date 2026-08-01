@@ -11,6 +11,13 @@ Une regle :
   - evidence: templates interpoles avec les signaux -> les preuves citees
   - remediation: texte redige a la main, jamais genere
 
+Traduction (v0.6) : `title`/`evidence`/`remediation` portent le francais, et
+les champs freres `title_en`/`evidence_en`/`remediation_en` l'anglais. Une
+traduction absente retombe sur le francais — jamais d'erreur, jamais de trou
+dans le rapport. Le champ `verdict` et le champ `confidence`, eux, ne sont PAS
+traduits : ce sont des identifiants sur lesquels le JSON et les regles
+utilisateur s'appuient (voir i18n.py).
+
 Le mini-DSL de condition est volontairement pauvre : "champ op litteral".
 Pas d'eval(), pas d'expressions arbitraires — une regle illisible est une
 regle fausse en puissance.
@@ -25,6 +32,7 @@ from typing import Any, Optional
 
 import yaml
 
+from ..i18n import DEFAULT_LANG, LANGS
 from ..signals import FlowSignals
 
 VERDICTS = {"RESEAU", "APP", "OS", "HOTE", "AMBIGU", "RAS"}
@@ -161,6 +169,11 @@ class Rule:
     unless: Optional[Clause]
     evidence: list[str]
     remediation: str
+    # Traductions, par code de langue. Le francais reste dans les champs
+    # ci-dessus (compatibilite : tout code existant lit `rule.title`).
+    title_i18n: dict[str, str] = field(default_factory=dict)
+    evidence_i18n: dict[str, list[str]] = field(default_factory=dict)
+    remediation_i18n: dict[str, str] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, d: dict) -> "Rule":
@@ -170,6 +183,20 @@ class Rule:
         if d["verdict"] not in VERDICTS:
             raise RuleError(f"Regle {d['id']!r}: verdict {d['verdict']!r} inconnu "
                             f"(attendu: {sorted(VERDICTS)})")
+        # Champs freres `<champ>_<lang>` pour toute langue connue autre que le
+        # francais, qui est porte par le champ nu. Une regle utilisateur qui
+        # n'en fournit aucun reste parfaitement valide : elle sortira en
+        # francais quelle que soit --lang, ce qui est honnete et ne casse rien.
+        titres, preuves, remedes = {}, {}, {}
+        for lang in LANGS:
+            if lang == DEFAULT_LANG:
+                continue
+            if d.get(f"title_{lang}"):
+                titres[lang] = d[f"title_{lang}"]
+            if d.get(f"evidence_{lang}"):
+                preuves[lang] = list(d[f"evidence_{lang}"])
+            if d.get(f"remediation_{lang}"):
+                remedes[lang] = str(d[f"remediation_{lang}"]).strip()
         return cls(
             id=d["id"],
             verdict=d["verdict"],
@@ -180,7 +207,21 @@ class Rule:
             unless=Clause.parse({"any": d["unless"]}) if d.get("unless") else None,
             evidence=list(d.get("evidence", [])),
             remediation=str(d.get("remediation", "")).strip(),
+            title_i18n=titres,
+            evidence_i18n=preuves,
+            remediation_i18n=remedes,
         )
+
+    # --- acces localise ; repli sur le francais, jamais d'exception ---------
+
+    def title_for(self, lang: str = DEFAULT_LANG) -> str:
+        return self.title_i18n.get(lang) or self.title
+
+    def evidence_for(self, lang: str = DEFAULT_LANG) -> list[str]:
+        return self.evidence_i18n.get(lang) or self.evidence
+
+    def remediation_for(self, lang: str = DEFAULT_LANG) -> str:
+        return self.remediation_i18n.get(lang) or self.remediation
 
 
 @dataclass
@@ -188,9 +229,17 @@ class Match:
     rule: Rule
     evidence: list[str]
     remediation: str = ""          # remediation de la regle, interpolee
+    # Titre deja localise. Porte par le Match et non relu depuis la regle :
+    # l'appelant qui affiche n'a pas a savoir dans quelle langue l'analyse a
+    # tourne, et le JSON ne peut pas diverger de la console.
+    title: str = ""
 
     @property
     def verdict(self) -> str: return self.rule.verdict
+
+    def __post_init__(self):
+        if not self.title:
+            self.title = self.rule.title
 
 
 @dataclass
@@ -226,9 +275,15 @@ def load_rules(extra_files: Optional[list[str | Path]] = None) -> list[Rule]:
                 r.when.eval(probe)
                 if r.unless is not None:
                     r.unless.eval(probe)
-                for t in r.evidence:
-                    _FMT.vformat(t, (), probe)
-                _FMT.vformat(r.remediation, (), probe)
+                # TOUTES les langues sont eprouvees, pas seulement le
+                # francais : une accolade fautive dans une traduction doit
+                # exploser au chargement comme n'importe quelle autre faute de
+                # regle. Sans ca, elle attendrait le premier --lang en, c'est
+                # a dire le pire moment (en pleine analyse d'incident).
+                for lang in LANGS:
+                    for t in r.evidence_for(lang):
+                        _FMT.vformat(t, (), probe)
+                    _FMT.vformat(r.remediation_for(lang), (), probe)
             except RuleError as e:
                 raise RuleError(f"Regle {r.id!r} ({f.name}): {e}")
             rules.append(r)
@@ -262,11 +317,20 @@ AMBIGU_FALLBACK = Rule(
         "englobant le debut de l'incident, idealement des deux cotes "
         "(client ET serveur) avec 'netverdict capture' pour joindre l'etat hote."
     ),
+    title_i18n={"en": "Anomalies present but the picture is incomplete"},
+    # La preuve est un vidage de compteurs : les noms de champs sont ceux du
+    # moteur, il n'y a rien a traduire.
+    evidence_i18n={},
+    remediation_i18n={"en": (
+        "The capture is not enough to decide. Take a longer capture covering "
+        "the start of the incident, ideally from both sides (client AND "
+        "server) with 'netverdict capture' to attach the host state."
+    )},
 )
 
 
-def evaluate(all_signals: list[FlowSignals],
-             rules: list[Rule]) -> list[FlowVerdict]:
+def evaluate(all_signals: list[FlowSignals], rules: list[Rule],
+             lang: str = DEFAULT_LANG) -> list[FlowVerdict]:
     out: list[FlowVerdict] = []
     for s in all_signals:
         sig_dict = s.as_dict()
@@ -278,13 +342,16 @@ def evaluate(all_signals: list[FlowSignals],
                 continue
             if r.unless is not None and r.unless.eval(sig_dict):
                 continue
-            ev = [_FMT.vformat(t, (), sig_dict) for t in r.evidence]
-            matches.append(Match(rule=r, evidence=ev,
-                                 remediation=_FMT.vformat(r.remediation, (), sig_dict)))
+            ev = [_FMT.vformat(t, (), sig_dict) for t in r.evidence_for(lang)]
+            matches.append(Match(
+                rule=r, evidence=ev, title=r.title_for(lang),
+                remediation=_FMT.vformat(r.remediation_for(lang), (), sig_dict)))
         matches.sort(key=lambda m: -m.rule.priority)
         if not matches and _has_unexplained_anomaly(s):
-            ev = [_FMT.vformat(t, (), sig_dict) for t in AMBIGU_FALLBACK.evidence]
+            ev = [_FMT.vformat(t, (), sig_dict)
+                  for t in AMBIGU_FALLBACK.evidence_for(lang)]
             matches.append(Match(rule=AMBIGU_FALLBACK, evidence=ev,
-                                 remediation=AMBIGU_FALLBACK.remediation))
+                                 title=AMBIGU_FALLBACK.title_for(lang),
+                                 remediation=AMBIGU_FALLBACK.remediation_for(lang)))
         out.append(FlowVerdict(signals=s, matches=matches))
     return out
