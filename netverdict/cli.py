@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 from . import __version__
+from .i18n import LANGS, resolve_lang, t
 
 
 def cmd_analyze(args: argparse.Namespace) -> int:
@@ -19,16 +20,20 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     from .report import render_console, to_json
     from .hostsnap import HostSnapshot
 
+    # Resolue AVANT tout : le premier message d'erreur possible doit deja
+    # sortir dans la bonne langue.
+    lang = resolve_lang(args.lang)
+
     try:
         rules = load_rules(args.rules)
     except RuleError as e:
-        print(f"Erreur dans les regles : {e}", file=sys.stderr)
+        print(t("err.rules", lang, e=e), file=sys.stderr)
         return 2
 
     try:
-        cap = read_capture(args.capture)
+        cap = read_capture(args.capture, lang)
     except FileNotFoundError:
-        print(f"Fichier introuvable : {args.capture}", file=sys.stderr)
+        print(t("err.file_not_found", lang, path=args.capture), file=sys.stderr)
         return 2
     except ValueError as e:
         print(f"{e}", file=sys.stderr)
@@ -36,7 +41,7 @@ def cmd_analyze(args: argparse.Namespace) -> int:
 
     flows = build_flows(cap)
     signals = [compute_signals(fl) for fl in flows]
-    verdicts = evaluate(signals, rules)
+    verdicts = evaluate(signals, rules, lang)
 
     snapshot = None
     if args.snapshot:
@@ -49,12 +54,11 @@ def cmd_analyze(args: argparse.Namespace) -> int:
         if not args.syslog:
             # Sans --syslog, l'option ne s'applique a rien. Le silence ferait
             # croire a un decalage corrige alors que rien n'a bouge.
-            print("--syslog-tz n'a d'effet qu'avec --syslog (aucun fichier "
-                  "syslog fourni)", file=sys.stderr)
+            print(t("err.syslog_tz_needs_syslog", lang), file=sys.stderr)
             return 2
         from .sources.syslog import parse_tz
         try:
-            syslog_tz = parse_tz(args.syslog_tz)
+            syslog_tz = parse_tz(args.syslog_tz, lang)
         except ValueError as e:
             print(f"--syslog-tz: {e}", file=sys.stderr)
             return 2
@@ -70,7 +74,7 @@ def cmd_analyze(args: argparse.Namespace) -> int:
         for path in args.events:
             from .sources import evtx
             try:
-                evs, st = evtx.parse(path)
+                evs, st = evtx.parse(path, lang)
             except (ValueError, OSError) as e:
                 print(f"--events {path}: {e}", file=sys.stderr)
                 return 2
@@ -103,7 +107,7 @@ def cmd_analyze(args: argparse.Namespace) -> int:
             from .sources import syslog as syslog_src
             try:
                 evs, st = syslog_src.parse(path, now=syslog_anchor,
-                                           tz=syslog_tz)
+                                           tz=syslog_tz, lang=lang)
             except (ValueError, OSError) as e:
                 print(f"--syslog {path}: {e}", file=sys.stderr)
                 return 2
@@ -111,7 +115,7 @@ def cmd_analyze(args: argparse.Namespace) -> int:
         for path in args.audit:
             from .sources import auditd
             try:
-                evs, st = auditd.parse(path)
+                evs, st = auditd.parse(path, lang)
             except (ValueError, OSError) as e:
                 print(f"--audit {path}: {e}", file=sys.stderr)
                 return 2
@@ -121,18 +125,19 @@ def cmd_analyze(args: argparse.Namespace) -> int:
         timeline = timeline.window(cap.t_first, cap.t_last)
 
     if args.json:
-        print(to_json(cap, verdicts, snapshot, timeline))
+        print(to_json(cap, verdicts, snapshot, timeline, lang))
     else:
         render_console(cap, verdicts, snapshot, top=args.top,
-                       timeline=timeline)
+                       timeline=timeline, lang=lang)
 
     if args.explain:
         from .explain import explain, ExplainUnavailable
         try:
-            print(explain(to_json(cap, verdicts, snapshot, timeline)))
+            print(explain(to_json(cap, verdicts, snapshot, timeline, lang),
+                          lang))
             print()
         except ExplainUnavailable as e:
-            print(f"[--explain indisponible] {e}", file=sys.stderr)
+            print(t("explain.unavailable", lang, e=e), file=sys.stderr)
 
     # Code retour utilisable en script : 0 = rien d'anormal, 1 = au moins un
     # verdict non-RAS (meme convention que grep : "trouve" vs "rien trouve").
@@ -157,13 +162,12 @@ def cmd_capture(args: argparse.Namespace) -> int:
     # (inexistant), /proc/loadavg (inexistant) et `tcpdump -i any` (pas de
     # pseudo-interface `any` en BSD), en laissant un tcpdump orphelin en train
     # d'ecrire. Mieux vaut un message honnete (audit du 26/07).
+    lang = resolve_lang(args.lang)
     systeme = platform.system()
     if systeme not in ("Windows", "Linux"):
-        print(f"`netverdict capture` ne gere que Windows et Linux "
-              f"(detecte : {systeme or 'inconnu'}).\n"
-              f"Capturer avec l'outil natif du systeme, puis analyser :\n"
-              f"  sudo tcpdump -i <interface> -s 96 -w capture.pcap\n"
-              f"  netverdict analyze capture.pcap", file=sys.stderr)
+        print(t("err.capture_unsupported_os", lang,
+                systeme=systeme or t("err.capture_os_unknown", lang)),
+              file=sys.stderr)
         return 2
     here = Path(__file__).parent / "capture"
     if systeme == "Windows":
@@ -182,15 +186,15 @@ def cmd_capture(args: argparse.Namespace) -> int:
         if args.out:
             cmd += ["-o", str(args.out)]
     if not script.exists():
-        print(f"Script de capture introuvable : {script}", file=sys.stderr)
+        print(t("err.capture_script_missing", lang, path=script),
+              file=sys.stderr)
         return 2
     try:
         return subprocess.call(cmd)
     except FileNotFoundError:
         # bash absent (Alpine/busybox, image distroless) ou powershell hors
         # du PATH : un traceback nu n'aide personne.
-        print(f"Interpreteur introuvable : `{cmd[0]}` n'est pas installe ou "
-              f"absent du PATH.", file=sys.stderr)
+        print(t("err.interpreter_missing", lang, cmd=cmd[0]), file=sys.stderr)
         return 2
 
 
@@ -201,10 +205,12 @@ def cmd_compare(args: argparse.Namespace) -> int:
 
     from .compare import comparer
 
+    lang = resolve_lang(args.lang)
+
     try:
-        resultats, diag = comparer(args.amont, args.aval)
+        resultats, diag = comparer(args.amont, args.aval, lang)
     except FileNotFoundError as e:
-        print(f"Fichier introuvable : {e.filename}", file=sys.stderr)
+        print(t("err.file_not_found", lang, path=e.filename), file=sys.stderr)
         return 2
     except ValueError as e:
         print(f"{e}", file=sys.stderr)
@@ -215,21 +221,13 @@ def cmd_compare(args: argparse.Namespace) -> int:
     # appelant. Les avertissements partent alors sur stderr.
     con = Console(file=sys.stderr if args.json else None)
     con.print()
-    con.print(Text(f"amont : {diag['flux_a']} flux   aval : {diag['flux_b']} "
-                   f"flux   communs : {diag['flux_communs']}", style="dim"))
+    con.print(Text(t("compare.diag", lang, a=diag["flux_a"], b=diag["flux_b"],
+                     communs=diag["flux_communs"]), style="dim"))
     if diag["nat_probable"]:
-        con.print(Text(
-            "AUCUN flux commun alors que les deux captures contiennent du "
-            "trafic : un equipement reecrit probablement les adresses (NAT) "
-            "entre les deux points, ou les captures ne portent pas sur le "
-            "meme trafic. Comparaison impossible en l'etat — capturer en "
-            "amont ET en aval du NAT, ou filtrer sur le trafic traduit.",
-            style="bold red"))
+        con.print(Text(t("compare.nat", lang), style="bold red"))
         return 2
     if not resultats:
-        con.print(Text("aucun flux commun aux deux captures : verifier "
-                       "qu'elles portent sur le meme trafic et se recouvrent "
-                       "dans le temps.", style="bold red"))
+        con.print(Text(t("compare.no_common", lang), style="bold red"))
         return 2
 
     if args.json:
@@ -239,8 +237,8 @@ def cmd_compare(args: argparse.Namespace) -> int:
             "diagnostic": diag,
             "flux": [{
                 "flow": str(c.cle),
-                "verdict": c.verdict()[0],
-                "explication": c.verdict()[1],
+                "verdict": c.verdict(lang)[0],
+                "explication": c.verdict(lang)[1],
                 "offset_horloge_s": c.offset_horloge_s,
                 "latence_reseau_ms": c.latence_reseau_ms,
                 "note": c.note,
@@ -250,47 +248,50 @@ def cmd_compare(args: argparse.Namespace) -> int:
                          for e in c.ecarts],
             } for c in resultats],
         }, indent=2, ensure_ascii=False))
-        return 1 if any(c.verdict()[0] == "RESEAU" for c in resultats) else 0
+        return 1 if any(c.verdict(lang)[0] == "RESEAU" for c in resultats) else 0
 
+    from .report import verdict_label
     couleurs = {"RESEAU": "bold red", "RAS": "bold green", "AMBIGU": "bold cyan"}
     for c in resultats[:args.top]:
-        verdict, phrase = c.verdict()
+        verdict, phrase = c.verdict(lang)
         con.print()
-        con.print(Text(f" {verdict} ", style=couleurs.get(verdict, "bold")),
+        con.print(Text(f" {verdict_label(verdict, lang)} ",
+                       style=couleurs.get(verdict, "bold")),
                   Text(f"— {c.cle}"))
         con.print(Text(f"  {phrase}"))
         for e in c.ecarts:
-            con.print(Text(f"  * {e.sens} : {e.segments_amont} emis, "
-                           f"{e.segments_aval} retrouves"
-                           + (f", {e.perdus} PERDUS ({e.taux_perte:.1%})"
-                              if e.perdus else "")))
+            con.print(Text(t("compare.direction_line", lang, sens=e.sens,
+                             amont=e.segments_amont, aval=e.segments_aval)
+                           + (t("compare.lost", lang, n=e.perdus,
+                                taux=e.taux_perte) if e.perdus else "")))
         if c.latence_reseau_ms is not None:
-            con.print(Text(f"  * latence entre les deux points : "
-                           f"{c.latence_reseau_ms:.1f} ms (estimee sur des "
-                           f"segments non retransmis, hypothese de symetrie "
-                           f"des deux sens)", style="dim"))
-        if c.offset_horloge_s:
-            con.print(Text(f"  * decalage d'horloge estime entre les deux "
-                           f"machines : {c.offset_horloge_s:+.3f} s",
+            con.print(Text(t("compare.latency", lang, ms=c.latence_reseau_ms),
                            style="dim"))
+        if c.offset_horloge_s:
+            con.print(Text(t("compare.clock_offset", lang,
+                             s=c.offset_horloge_s), style="dim"))
         if c.note:
             con.print(Text(f"  ! {c.note}", style="yellow"))
     if len(resultats) > args.top:
-        con.print(Text(f"\n... {len(resultats) - args.top} autre(s) flux — "
-                       f"--top pour en voir plus", style="dim"))
+        con.print(Text(t("compare.more_flows", lang,
+                         n=len(resultats) - args.top), style="dim"))
     con.print()
-    return 1 if any(c.verdict()[0] == "RESEAU" for c in resultats) else 0
+    return 1 if any(c.verdict(lang)[0] == "RESEAU" for c in resultats) else 0
 
 
 def cmd_rules(args: argparse.Namespace) -> int:
     from .rules.engine import load_rules, RuleError
+    lang = resolve_lang(args.lang)
     try:
         rules = load_rules(args.rules)
     except RuleError as e:
-        print(f"Erreur dans les regles : {e}", file=sys.stderr)
+        print(t("err.rules", lang, e=e), file=sys.stderr)
         return 2
+    # Le JETON de verdict est garde tel quel ici, et non son libelle : cette
+    # sortie sert a ecrire des regles (--rules), donc a manipuler des
+    # identifiants. Seul le titre suit la langue.
     for r in sorted(rules, key=lambda x: -x.priority):
-        print(f"{r.priority:>3}  {r.verdict:<7} {r.id:<22} {r.title}")
+        print(f"{r.priority:>3}  {r.verdict:<7} {r.id:<22} {r.title_for(lang)}")
     return 0
 
 
@@ -309,64 +310,64 @@ def main(argv: list[str] | None = None) -> int:
             flux.reconfigure(encoding="utf-8", errors="replace")
         except (AttributeError, ValueError):
             pass          # flux remplace par un test ou non reconfigurable
+    # L'aide elle-meme suit $NETVERDICT_LANG : argparse construit ses textes
+    # AVANT de lire --lang, donc l'option ne peut pas traduire sa propre aide.
+    # La variable d'environnement, elle, est lisible tout de suite.
+    hlang = resolve_lang()
     p = argparse.ArgumentParser(
         prog="netverdict",
-        description="Triage d'incident : la capture dit si c'est le reseau, "
-                    "l'application ou le systeme — avec preuves.",
+        description=t("help.description", hlang),
     )
     p.add_argument("--version", action="version", version=f"netverdict {__version__}")
     sub = p.add_subparsers(dest="command", required=True)
 
-    pa = sub.add_parser("analyze", help="Analyse un pcap/pcapng et rend les verdicts")
-    pa.add_argument("capture", help="Fichier .pcap ou .pcapng (pour un .etl Windows : "
-                                    "pktmon etl2pcap d'abord)")
-    pa.add_argument("--snapshot", help="snapshot.json d'etat hote pris pendant la capture")
+    def add_lang(parser):
+        # Sur CHAQUE sous-commande plutot qu'en global : `netverdict analyze
+        # x.pcap --lang en` est l'ordre qu'on tape naturellement, et un
+        # argument global devrait se placer avant la sous-commande.
+        parser.add_argument("--lang", choices=list(LANGS), default=None,
+                            help=t("help.lang", hlang))
+
+    pa = sub.add_parser("analyze", help=t("help.analyze", hlang))
+    pa.add_argument("capture", help=t("help.capture_arg", hlang))
+    pa.add_argument("--snapshot", help=t("help.snapshot", hlang))
     pa.add_argument("--events", action="append", default=[],
-                    help="Events Windows : .evtx ou export XML wevtutil "
-                         "(cumulable) — alimente la timeline des changements")
+                    help=t("help.events", hlang))
     pa.add_argument("--syslog", action="append", default=[],
-                    help="Fichier syslog plat (cumulable) — alimente la "
-                         "timeline des changements")
+                    help=t("help.syslog", hlang))
     pa.add_argument("--audit", action="append", default=[],
-                    help="Journal auditd Linux (/var/log/audit/audit.log, "
-                         "cumulable) — retrouve le process d'un flux meme "
-                         "deja mort (parite Linux de Sysmon)")
-    pa.add_argument("--syslog-tz", metavar="FUSEAU",
-                    help="Fuseau des lignes RFC3164 (sans fuseau dans le "
-                         "format) : UTC, un decalage fixe (+02:00) ou un nom "
-                         "IANA (Europe/Paris). Par defaut : fuseau du poste "
-                         "d'analyse, ce qui decale un syslog central en UTC "
-                         "hors de la fenetre de la capture. Sans effet sur "
-                         "les lignes RFC5424, qui portent leur propre fuseau")
+                    help=t("help.audit", hlang))
+    pa.add_argument("--syslog-tz", metavar=t("help.syslog_tz_metavar", hlang),
+                    help=t("help.syslog_tz", hlang))
     pa.add_argument("--rules", action="append", default=[],
-                    help="Fichier YAML de regles additionnelles (cumulable)")
-    pa.add_argument("--json", action="store_true", help="Sortie JSON complete")
-    pa.add_argument("--top", type=int, default=10,
-                    help="Nombre max de conversations detaillees (defaut 10)")
+                    help=t("help.rules", hlang))
+    pa.add_argument("--json", action="store_true", help=t("help.json", hlang))
+    pa.add_argument("--top", type=int, default=10, help=t("help.top", hlang))
     pa.add_argument("--explain", action="store_true",
-                    help="Ajoute une synthese narrative via l'API Claude "
-                         "(optionnel, n'envoie que le rapport, jamais le pcap)")
+                    help=t("help.explain", hlang))
+    add_lang(pa)
     pa.set_defaults(func=cmd_analyze)
 
-    pc = sub.add_parser("capture", help="Capture assistee : trafic + etat hote en un coup")
-    pc.add_argument("--duration", type=int, help="Duree de capture en secondes (defaut 60)")
-    pc.add_argument("--out", help="Dossier de sortie du bundle")
+    pc = sub.add_parser("capture", help=t("help.capture", hlang))
+    pc.add_argument("--duration", type=int, help=t("help.duration", hlang))
+    pc.add_argument("--out", help=t("help.out", hlang))
+    add_lang(pc)
     pc.set_defaults(func=cmd_capture)
 
-    pcmp = sub.add_parser(
-        "compare",
-        help="Compare deux captures du meme trafic prises en deux points "
-             "(client et serveur) : dit OU les paquets se perdent")
-    pcmp.add_argument("amont", help="Capture cote CLIENT (point amont)")
-    pcmp.add_argument("aval", help="Capture cote SERVEUR (point aval)")
-    pcmp.add_argument("--json", action="store_true", help="Sortie JSON")
+    pcmp = sub.add_parser("compare", help=t("help.compare", hlang))
+    pcmp.add_argument("amont", help=t("help.amont", hlang))
+    pcmp.add_argument("aval", help=t("help.aval", hlang))
+    pcmp.add_argument("--json", action="store_true",
+                      help=t("help.compare_json", hlang))
     pcmp.add_argument("--top", type=int, default=10,
-                      help="Nombre max de flux detailles (defaut 10)")
+                      help=t("help.compare_top", hlang))
+    add_lang(pcmp)
     pcmp.set_defaults(func=cmd_compare)
 
-    pr = sub.add_parser("rules", help="Liste les regles de verdict chargees")
+    pr = sub.add_parser("rules", help=t("help.rules_cmd", hlang))
     pr.add_argument("--rules", action="append", default=[],
-                    help="Fichier YAML de regles additionnelles (cumulable)")
+                    help=t("help.rules", hlang))
+    add_lang(pr)
     pr.set_defaults(func=cmd_rules)
 
     args = p.parse_args(argv)
