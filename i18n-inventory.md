@@ -240,3 +240,28 @@ La traduction complete du README est hors perimetre.
    traduction doit conserver **exactement** les memes noms de champs entre
    accolades, sinon `load_rules` leve au chargement (ce qui est le
    comportement voulu, mais il faut le savoir).
+
+## 10. Etat apres implementation
+
+Tout ce qui est liste en §1 a §7 est traduit, a l'exception documentee en §8.
+
+**Verification du « francais inchange au mot pres »** : la sortie console ET
+le JSON des 9 pcaps de `tests/fixtures/`, plus un cas avec timeline
+(syslog + auditd), ont ete captures AVANT modification puis rejoues APRES.
+Diff : **aucune ligne differente** (961 lignes comparees).
+
+**Verification du « anglais sans residu »** : `tests/test_i18n.py` cherche
+37 mots francais sans ambiguite et toute lettre latine accentuee dans la
+sortie EN de 9 pcaps, de la timeline (pleine et vide), de l'attribution de
+process et du snapshot d'hote. Le detecteur a ete falsifie a l'envers — il
+releve 3 a 14 mots sur chaque sortie FR, et 0 sur chaque sortie EN.
+
+Deux ecarts a signaler au relecteur :
+
+1. `confidence: faible` reste **non traduit en francais** (« faible » brut),
+   parce que lui donner un libelle changerait la sortie FR existante. En
+   anglais il vaut `low confidence`. Le corriger cote FR est une decision de
+   mainteneur, pas un effet de bord d'i18n — un commit d'une ligne.
+2. `tests/test_paquet.py` a du gagner `lang = None` dans son faux
+   `argparse.Namespace` : la signature de `cmd_capture` lit desormais
+   `args.lang`. Aucune autre modification de test existant.
