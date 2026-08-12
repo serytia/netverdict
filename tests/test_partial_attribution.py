@@ -67,8 +67,10 @@ def test_attribution_partielle_de_bout_en_bout():
 def test_le_rapport_annonce_la_faiblesse():
     attr = attribution_for(_fv(), _timeline(_conn_event(1000.2)))
     texte = attr.describe()
-    assert "DESTINATION seule" in texte
-    assert "indiscernable" in texte
+    # describe() sans lang explicite suit desormais le defaut de l'outil
+    # (anglais depuis 0.7.0) : voir test_i18n.py pour la bascule --lang.
+    assert "DESTINATION only" in texte
+    assert "indistinguishable" in texte
 
 
 # --- il ne doit pas produire de faux positifs ------------------------------
@@ -112,4 +114,4 @@ def test_plusieurs_partielles_signalent_l_ambiguite():
                                             _conn_event(1000.9, pid=2)))
     assert attr.exact is False
     assert attr.candidates == 2
-    assert "2 connexions correspondaient" in attr.describe()
+    assert "2 connections matched" in attr.describe()

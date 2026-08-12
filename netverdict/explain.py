@@ -1,13 +1,13 @@
-"""Couche narrative optionnelle (--explain) : les preuves -> une explication.
+"""Optional narrative layer (--explain): evidence -> a plain-English explanation.
 
-Principes non negociables :
-- Le LLM ne voit JAMAIS le pcap : uniquement le rapport JSON (signaux extraits,
-  verdicts, preuves). Un pcap contient des secrets ; un rapport n'en contient
-  que la radiographie.
-- Le LLM n'emet pas le verdict : il RACONTE le verdict que le moteur
-  deterministe a rendu. S'il n'y a pas de matiere, il n'y a pas d'explication.
-- Dependance optionnelle : l'outil complet fonctionne sans. `pip install
-  netverdict[explain]` + une cle API pour activer.
+Non-negotiable principles:
+- The model NEVER sees the packet capture: only the JSON report (extracted
+  signals, verdicts, evidence). A capture carries secrets; a report carries
+  only their X-ray.
+- The model does not issue the verdict: it NARRATES the verdict the
+  deterministic engine already produced. No findings, no narration.
+- Optional dependency: the whole tool works without it. `pip install
+  netverdict[explain]` plus an API key to enable.
 """
 
 from __future__ import annotations

@@ -69,7 +69,10 @@ class TestParseTz:
 
     def test_nom_iana_introuvable_donne_une_consigne_actionnable(self):
         """Un nom qui RESSEMBLE a une zone IANA (avec '/') : le message doit
-        proposer un remede, pas laisser l'utilisateur devant un echec nu."""
+        proposer un remede, pas laisser l'utilisateur devant un echec nu.
+        parse_tz() sans lang explicite rend desormais l'anglais (defaut de
+        l'outil depuis 0.7.0) : le test verifie le CONTENU du message, pas sa
+        langue — voir test_i18n.py pour la bascule --lang."""
         with pytest.raises(ValueError) as exc:
             parse_tz("Europe/Nulle_Part")
         message = str(exc.value)
@@ -77,7 +80,7 @@ class TestParseTz:
         # Selon la machine : soit la base manque (remede tzdata), soit elle est
         # la et c'est le nom qui est faux (formes acceptees). Les deux sont
         # actionnables ; on exige l'un ou l'autre, jamais un echec muet.
-        assert ("tzdata" in message) or ("Formes acceptees" in message)
+        assert ("tzdata" in message) or ("Accepted forms" in message)
 
     def test_une_chaine_absurde_ne_conseille_PAS_d_installer_tzdata(self):
         """Defaut trouve en verification : 'nawak' recevait le message
@@ -87,7 +90,7 @@ class TestParseTz:
             parse_tz("nawak")
         message = str(exc.value)
         assert "tzdata" not in message
-        assert "Formes acceptees" in message
+        assert "Accepted forms" in message
 
     def test_nom_iana_si_la_base_est_disponible(self):
         """Environnement-dependant : verifie seulement que, quand la base

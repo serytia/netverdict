@@ -135,10 +135,10 @@ netverdict capture --duration 60                  # Windows: pktmon (natif) / Li
 # Lister les regles de verdict
 netverdict rules
 
-# Sortie en anglais (defaut : francais). Disponible sur toutes les
-# sous-commandes, et via l'environnement pour ne pas la repeter :
-netverdict analyze capture.pcap --lang en
-export NETVERDICT_LANG=en                         # Windows : $env:NETVERDICT_LANG="en"
+# Sortie en francais (defaut depuis 0.7.0 : anglais). Disponible sur toutes
+# les sous-commandes, et via l'environnement pour ne pas la repeter :
+netverdict analyze capture.pcap --lang fr
+export NETVERDICT_LANG=fr                         # Windows : $env:NETVERDICT_LANG="fr"
 ```
 
 Code retour : `0` = rien d'anormal, `1` = au moins un verdict, `2` = erreur.
@@ -147,7 +147,9 @@ Code retour : `0` = rien d'anormal, `1` = au moins un verdict, `2` = erreur.
 
 `--lang {fr,en}` traduit **tout ce qu'un humain lit** : titres de verdict,
 preuves, pistes de correction, timeline, `--help`, messages d'erreur, et la
-langue demandee au modele par `--explain`. Le defaut reste `fr` ; `--lang`
+langue demandee au modele par `--explain`. **Depuis 0.7.0 le defaut est `en`**
+(l'outil est sur PyPI, son public est international) : les francophones passent
+`--lang fr` ou exportent `NETVERDICT_LANG=fr` une fois pour toutes. `--lang`
 prime sur `$NETVERDICT_LANG`, qui prime sur le defaut.
 
 Ce que `--lang` ne change **jamais**, volontairement : les jetons de verdict

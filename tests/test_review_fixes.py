@@ -42,8 +42,10 @@ def test_render_timeline_empty_still_reports():
                   SourceStats(total_lines=500, parsed=0, unparsed=500))
     render_timeline(tl, incident_ts=None, con=con, windowed=True)
     out = buf.getvalue()
-    assert "aucun changement" in out
-    assert "500 illisibles" in out
+    # render_timeline() sans lang explicite rend desormais l'anglais (defaut
+    # de l'outil depuis 0.7.0) : voir test_i18n.py pour la bascule --lang.
+    assert "no infrastructure changes detected" in out
+    assert "500 unreadable" in out
 
 
 # --- H4 : injection ANSI neutralisee a l'emission (dans le contrat) --------
@@ -65,7 +67,9 @@ def test_render_timeline_unwindowed_header():
     tl = Timeline()
     tl.add_source("s", [], SourceStats())
     render_timeline(tl, None, con, windowed=False)
-    assert "NON appliquee" in buf.getvalue()
+    # render_timeline() sans lang explicite rend desormais l'anglais (defaut
+    # de l'outil depuis 0.7.0) : voir test_i18n.py pour la bascule --lang.
+    assert "NOT applied" in buf.getvalue()
 
 
 def test_add_source_same_name_keeps_both_stats():

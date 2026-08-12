@@ -193,7 +193,9 @@ class TestTriDesAttributionsProcess:
         assert a is not None
         assert a.connection.pid == 222, "le plus proche du debut du flux"
         assert a.candidates == 2, "l'ambiguite doit etre signalee, pas tue"
-        assert "2 connexions" in a.describe()
+        # describe() sans lang explicite suit desormais le defaut de l'outil
+        # (anglais depuis 0.7.0) : voir test_i18n.py pour la bascule --lang.
+        assert "2 connections" in a.describe()
 
     def test_l_ordre_du_fichier_journal_ne_decide_pas(self):
         """Le meme cas, evenements inverses dans le journal : le resultat doit

@@ -36,7 +36,9 @@ from __future__ import annotations
 import os
 
 LANGS = ("fr", "en")
-DEFAULT_LANG = "fr"
+# Anglais par defaut depuis 0.7.0 : l'outil est sur PyPI et son public est
+# international. Un francophone garde tout par `--lang fr` ou NETVERDICT_LANG=fr.
+DEFAULT_LANG = "en"
 
 # Secours quand --lang est absent. Meme convention que les autres outils en
 # ligne de commande : l'option explicite prime toujours sur l'environnement.
@@ -44,13 +46,15 @@ ENV_VAR = "NETVERDICT_LANG"
 
 
 def resolve_lang(explicit: str | None = None) -> str:
-    """Langue effective : --lang, sinon $NETVERDICT_LANG, sinon francais.
+    """Langue effective : --lang, sinon $NETVERDICT_LANG, sinon anglais.
 
     Une valeur inconnue (faute de frappe, "de_DE" herite d'un $LANG systeme)
-    retombe sur le francais SANS erreur : l'analyse doit sortir, une langue
-    inattendue n'est pas une raison de ne rien rendre. argparse valide deja
-    --lang ; ce repli couvre la variable d'environnement, que personne ne
-    valide.
+    retombe sur la langue par defaut SANS erreur : l'analyse doit sortir, une
+    langue inattendue n'est pas une raison de ne rien rendre. argparse valide
+    deja --lang ; ce repli couvre la variable d'environnement, que personne ne
+    valide. A ne pas confondre avec le repli de t(), qui vise toujours le
+    francais : ici on choisit une LANGUE, la-bas on comble une TRADUCTION
+    manquante.
     """
     for candidat in (explicit, os.environ.get(ENV_VAR)):
         if candidat:
@@ -65,7 +69,15 @@ def t(key: str, lang: str = DEFAULT_LANG, **kwargs) -> str:
     entry = STRINGS.get(key)
     if entry is None:
         return key
-    template = entry.get(lang) or entry.get(DEFAULT_LANG) or key
+    # Repli fixe sur "fr", jamais sur DEFAULT_LANG : le francais est la SEULE
+    # langue garantie complete (voir REGLE DE REPLI plus haut et
+    # i18n-inventory.md), donc c'est le filet qui doit tenir quelle que soit
+    # la langue par defaut du jour. Avant ce correctif, le repli visait
+    # DEFAULT_LANG ; cela ne se voyait pas tant que DEFAULT_LANG valait "fr",
+    # mais son passage a "en" faisait retomber toute langue inconnue ou toute
+    # traduction manquante sur de l'anglais SILENCIEUSEMENT, au lieu du
+    # francais documente -- bug reel revele par le changement de defaut.
+    template = entry.get(lang) or entry.get("fr") or key
     if not kwargs:
         return template
     try:
@@ -598,8 +610,8 @@ STRINGS: dict[str, dict[str, str]] = {
               "network, the application or the host — with evidence.",
     },
     "help.lang": {
-        "fr": "Langue de la sortie (defaut : fr, ou $NETVERDICT_LANG)",
-        "en": "Output language (default: fr, or $NETVERDICT_LANG)",
+        "fr": "Langue de la sortie (defaut : en, ou $NETVERDICT_LANG)",
+        "en": "Output language (default: en, or $NETVERDICT_LANG)",
     },
     "help.analyze": {
         "fr": "Analyse un pcap/pcapng et rend les verdicts",

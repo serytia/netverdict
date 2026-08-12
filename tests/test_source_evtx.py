@@ -209,5 +209,7 @@ def test_evtx_binary_with_python_evtx_present_does_not_raise_import_error(tmp_pa
     p.write_bytes(b"ElfFile\x00" + b"\x00" * 64)
     events, stats = parse(p)          # ne doit pas lever
     assert events == []
-    assert "aucun evenement lu" in stats.note
+    # parse() sans lang explicite rend desormais l'anglais (defaut de l'outil
+    # depuis 0.7.0) : voir test_i18n.py pour la bascule --lang.
+    assert "no events read from this file" in stats.note
     assert "wevtutil" in stats.note   # la sortie de secours est donnee

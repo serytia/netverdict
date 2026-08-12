@@ -133,16 +133,18 @@ class TestHonneteteDeLAffichage:
         assert len(out) == 1
         assert out[0].during_flow is True
         assert out[0].delay_s < 0
-        assert "pendant le flux" in out[0].describe()
+        # describe() sans lang explicite suit desormais le defaut de l'outil
+        # (anglais depuis 0.7.0) : voir test_i18n.py pour la bascule --lang.
+        assert "during the flow" in out[0].describe()
 
     def test_sans_fuseau_fiable_aucune_precision_a_la_seconde(self, flux_reseau):
         t = flux_reseau.signals.t_first
         approx = suspects_for(flux_reseau, _tl(_ev(t - 138, tz_known=False)))[0]
         exact = suspects_for(flux_reseau, _tl(_ev(t - 138, tz_known=True)))[0]
-        assert "environ" in approx.describe()
-        assert "approximative" in approx.describe()
+        assert "about" in approx.describe()
+        assert "approximate" in approx.describe()
         assert "138 s" in exact.describe()
-        assert "environ" not in exact.describe()
+        assert "approximate" not in exact.describe()
 
 
 class TestCorrelateTable:

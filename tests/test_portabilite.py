@@ -53,8 +53,10 @@ def test_le_rapport_annonce_les_linktypes_mixtes(tmp_path, capsys):
     _pcapng_two_interfaces(f)
     main(["analyze", str(f)])
     sortie = capsys.readouterr().out
-    assert "PLUSIEURS interfaces" in sortie
-    assert "N'APPARAISSENT PAS" in sortie
+    # main() sans --lang rend desormais l'anglais (defaut de l'outil depuis
+    # 0.7.0) : voir test_i18n.py pour la bascule --lang.
+    assert "SEVERAL interfaces" in sortie
+    assert "DO NOT APPEAR" in sortie
 
 
 # --- H2 : ancre RFC3164 datee dans le mauvais millesime -------------------

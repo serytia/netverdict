@@ -120,22 +120,36 @@ def test_les_preuves_traduites_gardent_les_memes_champs():
 
 # --- 2. Le francais ne bouge pas -------------------------------------------
 
-def test_defaut_reste_le_francais(monkeypatch):
+def test_defaut_est_desormais_l_anglais(monkeypatch):
+    """Depuis 0.7.0, DEFAULT_LANG vaut "en" : l'outil est public sur PyPI, son
+    public est international. Le francais reste complet et disponible, mais
+    seulement sur demande (--lang fr ou $NETVERDICT_LANG=fr) — voir le test
+    suivant."""
     monkeypatch.delenv(ENV_VAR, raising=False)
-    assert resolve_lang() == "fr"
+    assert resolve_lang() == "en"
     sortie = _rendu("retrans_heavy", resolve_lang())
+    assert "Suggested fix:" in sortie
+    assert "Significant packet loss on the path" in sortie
+    assert "packets read" in sortie
+    assert "high confidence" in sortie
+
+
+def test_lang_fr_explicite_rend_toujours_le_francais_au_mot_pres():
+    """Le mot pour mot francais qui etait le defaut avant 0.7.0 : le passage
+    du defaut a l'anglais ne doit rien changer a ce que rend --lang fr."""
+    sortie = _rendu("retrans_heavy", "fr")
     assert "Piste de correction :" in sortie
     assert "Perte de paquets significative sur le chemin" in sortie
     assert "paquets lus" in sortie
     assert "confiance haute" in sortie
 
 
-def test_cli_sans_lang_rend_du_francais(capsys, monkeypatch):
+def test_cli_sans_lang_rend_de_l_anglais(capsys, monkeypatch):
     monkeypatch.delenv(ENV_VAR, raising=False)
     main(["analyze", str(FIXTURES_DIR / "retrans_heavy.pcap")])
     out = capsys.readouterr().out
-    assert "Piste de correction" in out
-    assert "Suggested fix" not in out
+    assert "Suggested fix" in out
+    assert "Piste de correction" not in out
 
 
 def test_faible_reste_non_traduit_en_francais():
@@ -233,16 +247,19 @@ def test_pas_de_traduction_vide_dans_la_table():
 # --- 5. Resolution de la langue --------------------------------------------
 
 def test_resolve_lang_precedence(monkeypatch):
-    monkeypatch.setenv(ENV_VAR, "en")
-    assert resolve_lang() == "en"
-    assert resolve_lang("fr") == "fr", "--lang doit primer sur l'environnement"
-    monkeypatch.delenv(ENV_VAR, raising=False)
+    monkeypatch.setenv(ENV_VAR, "fr")
     assert resolve_lang() == "fr"
+    assert resolve_lang("en") == "en", "--lang doit primer sur l'environnement"
+    monkeypatch.delenv(ENV_VAR, raising=False)
+    assert resolve_lang() == "en", "sans --lang ni $NETVERDICT_LANG, le defaut est l'anglais"
 
 
 @pytest.mark.parametrize("valeur,attendu", [
     ("en", "en"), ("EN", "en"), ("en_US", "en"), ("en-GB", "en"),
-    ("fr_FR.UTF-8", "fr"), ("de_DE", "fr"), ("", "fr"), ("klingon", "fr"),
+    ("fr_FR.UTF-8", "fr"),
+    # Une valeur qui ne correspond a aucune langue connue retombe sur le
+    # defaut de l'outil (anglais depuis 0.7.0), pas sur le francais en dur.
+    ("de_DE", "en"), ("", "en"), ("klingon", "en"),
 ])
 def test_resolve_lang_tolere_les_formes_de_l_environnement(monkeypatch, valeur,
                                                            attendu):
@@ -281,10 +298,12 @@ def test_le_prompt_explain_bascule():
     assert "TOUTE ta reponse est en English" in system_prompt("en")
 
 
-def test_explain_prompt_defaut_inchange():
+def test_explain_prompt_par_defaut_suit_desormais_l_anglais():
+    """SYSTEM est construit avec `system_prompt(DEFAULT_LANG)` : il suit le
+    defaut de langue de l'outil, plutot qu'un francais fige."""
     from netverdict.explain import SYSTEM
-    assert SYSTEM == system_prompt("fr")
-    assert "Redige en francais" in SYSTEM
+    assert SYSTEM == system_prompt("en")
+    assert "Redige en English" in SYSTEM
 
 
 # --- 7. Messages d'erreur ---------------------------------------------------
@@ -455,7 +474,7 @@ def test_snapshot_hote_suit_la_langue():
                   "ram libre 512 Mo")
     assert en == ("[SRV-APP01] socket held by java (pid 4212), "
                   "process cpu 97%, host cpu 63%, disk 98%, free ram 512 MB")
-    assert ctx.summary() == fr, "le defaut doit rester le francais"
+    assert ctx.summary() == en, "le defaut est desormais l'anglais"
 
 
 def test_compare_verdicts_suivent_la_langue():

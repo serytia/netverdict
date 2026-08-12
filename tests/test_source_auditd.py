@@ -307,7 +307,9 @@ class TestIntegrationCorrelate:
         assert a.exact is False
         assert a.candidates == 1
         assert "curl (pid 4212)" in a.describe()
-        assert "DESTINATION seule" in a.describe()
+        # describe() sans lang explicite suit desormais le defaut de l'outil
+        # (anglais depuis 0.7.0) : voir test_i18n.py pour la bascule --lang.
+        assert "DESTINATION only" in a.describe()
 
     def test_un_dst_different_ne_matche_toujours_pas(self, analyze, tmp_path):
         """Le fallback dst-seul ne doit pas devenir un match a vide : un

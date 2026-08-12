@@ -170,7 +170,9 @@ class TestJointure:
         assert a is not None
         assert a.side == "client"
         assert "curl.exe" in a.describe()
-        assert "cote client" in a.describe()
+        # describe() sans lang explicite suit desormais le defaut de l'outil
+        # (anglais depuis 0.7.0) : voir test_i18n.py pour la bascule --lang.
+        assert "on the client side" in a.describe()
 
     def test_attribue_le_process_du_cote_serveur_quand_le_sens_est_inverse(
             self, flux, colle, tmp_path):
@@ -225,7 +227,7 @@ class TestJointure:
         assert a is not None
         assert a.candidates == 2
         assert "bon.exe" in a.describe()
-        assert "port reutilise" in a.describe()
+        assert "port reuse" in a.describe()
 
     def test_la_jointure_vaut_aussi_pour_un_flux_sain(self, analyze, tmp_path):
         """Contrairement aux suspects : savoir quel process parle est utile

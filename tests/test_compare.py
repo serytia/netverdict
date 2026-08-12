@@ -67,7 +67,9 @@ def test_sans_perte_le_chemin_est_hors_de_cause(tmp_path):
     assert not diag["nat_probable"]
     verdict, phrase = resultats[0].verdict()
     assert verdict == "RAS"
-    assert "hors de cause" in phrase
+    # verdict() sans lang explicite rend desormais l'anglais (defaut de
+    # l'outil depuis 0.7.0) : voir test_i18n.py pour la bascule --lang.
+    assert "not at fault" in phrase
     assert all(e.perdus == 0 for e in resultats[0].ecarts)
 
 
@@ -78,7 +80,7 @@ def test_segments_manquants_en_aval_designent_le_chemin(tmp_path):
     resultats, _ = comparer(a, b)
     verdict, phrase = resultats[0].verdict()
     assert verdict == "RESEAU"
-    assert "ENTRE les deux points" in phrase
+    assert "BETWEEN the two points" in phrase
     assert sum(e.perdus for e in resultats[0].ecarts) == 2
 
 
@@ -130,7 +132,7 @@ def test_sans_handshake_aucune_latence_n_est_inventee(tmp_path):
     c = resultats[0]
     assert c.offset_horloge_s is None
     assert c.latence_reseau_ms is None
-    assert "non estimable" in c.note
+    assert "cannot be estimated" in c.note
     # Les comptages, eux, restent exploitables.
     assert sum(e.segments_amont for e in c.ecarts) > 0
 

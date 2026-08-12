@@ -16,7 +16,7 @@ taken at the same moment), extracts the TCP signals that don't lie, and returns
 an **argued verdict**:
 
 ```
-$ netverdict analyze capture.pcapng --lang en
+$ netverdict analyze capture.pcapng
 
 18 packets read — 18 TCP, 0 ICMP, 0 non-IP, 0 unreadable — 1 conversations
 ┌─────────  APP — 10.0.0.42:51006 -> 10.0.0.5:5432 [high confidence] ─────────┐
@@ -69,13 +69,13 @@ machine nor on the servers.
 
 ## Output language
 
-Console output defaults to **French** (the tool's original audience). One flag
-— or one environment variable, so you never have to repeat it — switches
-everything a human reads to English:
+Console output defaults to **English** since 0.7.0. The tool was born French and
+still speaks it fully — one flag, or one environment variable so you never have
+to repeat it:
 
 ```
-netverdict analyze capture.pcap --lang en
-export NETVERDICT_LANG=en                 # Windows: $env:NETVERDICT_LANG="en"
+netverdict analyze capture.pcap --lang fr
+export NETVERDICT_LANG=fr                 # Windows: $env:NETVERDICT_LANG="fr"
 ```
 
 `--lang` translates verdict titles, evidence, suggested fixes, the timeline,

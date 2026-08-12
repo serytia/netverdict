@@ -189,7 +189,16 @@ class Rule:
         # francais quelle que soit --lang, ce qui est honnete et ne casse rien.
         titres, preuves, remedes = {}, {}, {}
         for lang in LANGS:
-            if lang == DEFAULT_LANG:
+            # Le champ nu (title/evidence/remediation) porte TOUJOURS le
+            # francais, quelle que soit DEFAULT_LANG (voir docstring de la
+            # classe) : comparer a DEFAULT_LANG ici sautait "en" une fois le
+            # defaut passe a l'anglais, et les regles builtin (qui ne
+            # fournissent que title_en/evidence_en/remediation_en) se
+            # retrouvaient sans aucune traduction enregistree -> title_for
+            # ("en") repliait sur le francais. Bug reel revele par le
+            # changement de DEFAULT_LANG, corrige ici (pas un contournement
+            # de test : le champ nu est fixe en francais par construction).
+            if lang == "fr":
                 continue
             if d.get(f"title_{lang}"):
                 titres[lang] = d[f"title_{lang}"]
