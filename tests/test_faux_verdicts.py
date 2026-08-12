@@ -38,7 +38,10 @@ def _verdict(regles, **champs):
     """
     sig = FlowSignals(client="10.0.0.42", server="10.0.0.5", cport=51001,
                       sport=443, **champs)
-    fv = evaluate([sig], regles)[0]
+    # lang="fr" explicite : ce fichier verifie le texte francais precis des
+    # preuves, pas le defaut de langue de l'outil (DEFAULT_LANG = "en" depuis
+    # 0.7.0).
+    fv = evaluate([sig], regles, lang="fr")[0]
     ids = [m.rule.id for m in fv.matches]
     preuves = " | ".join(p for m in fv.matches for p in m.evidence)
     return (ids[0] if ids else None), ids, preuves
@@ -222,7 +225,10 @@ class TestFauxToutVaBien:
         # le cas a ete observe, et cela teste la chaine de rendu complete.
         pcap = Path(__file__).parent / "fixtures" / "lab" / "jitter.pcap"
         cap = read_capture(pcap)
-        verdicts = evaluate([compute_signals(f) for f in build_flows(cap)], regles)
+        # lang="fr" explicite (voir _verdict ci-dessus) : les assertions qui
+        # suivent portent sur le texte francais precis.
+        verdicts = evaluate([compute_signals(f) for f in build_flows(cap)],
+                            regles, lang="fr")
         assert any([m.rule.id for m in fv.matches] == ["rtt-degraded", "clean"]
                    for fv in verdicts), "les deux regles matchent vraiment ici"
         assert all(fv.verdict != "RAS" for fv in verdicts), (
@@ -230,7 +236,7 @@ class TestFauxToutVaBien:
             "apparaitre du tout dans le rapport")
 
         con = Console(file=io.StringIO(), width=200, no_color=True)
-        render_console(cap, verdicts, top=99, console=con)
+        render_console(cap, verdicts, top=99, console=con, lang="fr")
         sortie = con.file.getvalue()
         assert "gigue forte" in sortie, "le vrai diagnostic doit rester affiche"
         # Le panneau n'imprime les identifiants de regle QUE dans la ligne des

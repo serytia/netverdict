@@ -30,6 +30,15 @@ rules:
     when:
       all:
         - "icmp_admin_prohibited == true"
+        # « La connexion a ete refusee » suppose qu'elle ne s'est PAS faite.
+        # Sans cette garde, un seul ICMP suffisait a coller ce verdict — RESEAU,
+        # confiance haute, priorite 92, donc en tete du rapport — a une session
+        # qui avait fait son handshake, servi 1500 octets et ferme par FIN.
+        # L'admin partait chercher sur un equipement nomme une regle bloquant un
+        # trafic qui n'avait pas ete bloque, et le faux positif passait devant
+        # les vrais verdicts. Le cas etabli a sa propre regle, juste en dessous
+        # (durcissement du 08/08/2026).
+        - "established_seen == false"
     evidence:
       - "ICMP administratively-prohibited emis par {icmp_admin_prohibited_from} pour {client}:{cport} -> {server}:{sport}"
     remediation: |
@@ -175,6 +184,16 @@ rules:
     when:
       all:
         - "icmp_frag_needed == true"
+        # L'ICMP SEUL ne dit pas s'il y a une panne : recu et pris en compte,
+        # c'est la decouverte de MTU qui fait son travail, et le transfert
+        # passe. Derriere un tunnel a MTU reduite, CHAQUE connexion en produit
+        # un — l'outil peignait donc toute la capture en RESEAU/confiance haute
+        # et noyait la panne pour laquelle l'admin avait capture, en prescrivant
+        # au passage un clamp de MSS sur un mecanisme qui marchait. Le trou noir
+        # se reconnait a ce que l'emetteur ne REDUIT PAS son calibre
+        # (durcissement du 08/08/2026) ; le cas honore a sa propre regle,
+        # mtu-decouverte-reussie.
+        - "frag_needed_ignored == true"
     evidence:
       - "ICMP 'fragmentation needed' recu pour le flux {client}:{cport} -> {server}:{sport}"
     remediation: |
@@ -255,6 +274,47 @@ rules:
         - "ttfb_over_ack_ratio >= 5"
         - "server_ack_delay_ms_p95 < 250"
         - "retrans_rate < 0.01"
+    unless:
+      # LE CLIENT A FERME SA FENETRE. Le controle de flux TCP interdit alors au
+      # serveur d'emettre : sa reponse peut etre prete depuis longtemps, elle
+      # attend une fenetre. Le TTFB ne mesure plus le temps de l'application,
+      # et la preuve « ACK rapide donc c'est l'app » ne tient plus.
+      #
+      # Sans cette garde, un client lent (viewer de logs, tableur, client JDBC
+      # qui ne consomme pas son curseur) faisait accuser le serveur en tete de
+      # rapport avec « Chercher COTE APPLICATIF de {server} » — confiance haute,
+      # priorite 84 — pendant que le vrai coupable, zero-window-client (83),
+      # etait relegue en ligne grise de signaux secondaires. L'admin profilait
+      # une base de donnees innocente (durcissement du 08/08/2026).
+      #
+      # Seuil = CELUI de zero-window-client, jamais « une annonce quelconque » :
+      # les deux regles restent strictement complementaires, donc le flux
+      # inhibe ici est toujours ramasse la-bas et ne peut pas tomber entre les
+      # deux pour ressortir « tableau incomplet » (meme principe que
+      # clean / latency-tail-unexplained). Une fermeture fugace de quelques
+      # dizaines de ms reste du reglage fin de buffer et n'explique pas 800 ms.
+      #
+      # ... MAIS UNE DUREE N'EST PAS UNE EXPLICATION. Seule, la premiere
+      # condition est NUE : zw_max_ms_from_client est un maximum de durees, il
+      # ne dit pas QUAND la fenetre etait fermee. Un hoquet de 150 ms du poste
+      # client — un tableur qui fige, un antivirus qui scanne — survenu entre
+      # deux requetes suffisait a retirer le verdict APP d'un serveur qui met
+      # 900 ms a repondre : le rapport basculait sur HOTE et sa remediation
+      # « Le reseau et le serveur sont hors de cause » pendant que le serveur
+      # n'apparaissait plus nulle part. Mesure : la bascule suivait le seuil au
+      # lieu de suivre les faits, et 300 ms de hoquet effacaient un serveur a
+      # 10 s (revue adverse du 08/08/2026).
+      # Les deux conditions ajoutees sont ce qu'il fallait prouver :
+      #   - la fenetre fermee RECOUVRE l'attente d'une reponse (position
+      #     temporelle, pas seulement duree) ;
+      #   - elle en explique la MOITIE au moins — en deca, le serveur reste
+      #     responsable de l'essentiel du delai et doit rester accuse.
+      # L'inhibition reste un sous-ensemble strict de zero-window-client : le
+      # flux inhibe y est toujours ramasse, la complementarite tient.
+      - all:
+          - "zw_max_ms_from_client >= 100"
+          - "zw_client_attente_ms >= 100"
+          - "zw_client_part_attente >= 0.5"
     evidence:
       - "{exchanges} echanges : ACK serveur en {server_ack_delay_ms_p95:.0f} ms mais reponse en {ttfb_ms_p50:.0f} ms (p50) / {ttfb_ms_p95:.0f} ms (p95), 0 perte"
     remediation: |
@@ -313,31 +373,146 @@ rules:
         # evite de flagger 1 perte isolee sur un petit flux.
         - "retrans_rate >= 0.03"
         - "retrans_total >= 5"
+    unless:
+      # UN SEUL EPISODE. Le plancher ci-dessus dit vouloir ecarter « 1 perte
+      # isolee », mais il compte des SEGMENTS : une file qui deborde une fois
+      # emporte toute la fenetre en vol, et sept segments repartis ensemble au
+      # RTO franchissaient le plancher. L'outil rendait alors RESEAU, confiance
+      # haute, avec un taux a la decimale — un chiffre qui se recopie tel quel
+      # dans un ticket operateur — pour UNE mesure du chemin. Le cas garde un
+      # verdict, sans le taux ni la confiance : perte-rafale-unique, plus bas
+      # (durcissement du 08/08/2026).
+      - "perte_evenement_unique == true"
     evidence:
-      - "{retrans_total} retransmissions sur {pkts_total} paquets ({retrans_rate:.1%}) — c2s: {retrans_c2s}, s2c: {retrans_s2c}"
-      - "Rafales de dup-ACK : client {dup_ack_bursts_from_client}, serveur {dup_ack_bursts_from_server}"
+      # Denominateur du TAUX, pas nombre de paquets : « 73 retransmissions sur
+      # 1532 paquets (8,2 %) » ne tenait pas l'arithmetique (73/1532 = 4,8 %).
+      - "{retrans_total} retransmissions sur {retrans_base} segments de donnees ({retrans_rate:.1%}) en {retrans_events} episodes — c2s: {retrans_c2s}, s2c: {retrans_s2c}"
+      - "Rafales de dup-ACK : client {dup_ack_bursts_from_client}, serveur {dup_ack_bursts_from_server} ; renvois portant des octets deja acquittes : {retrans_deja_acquittees}"
     remediation: |
-      Il y a de la perte sur le chemin. Le sens des retransmissions dit ou
-      chercher (c2s = perte vers le serveur, s2c = perte vers le client).
-      Causes classiques par ordre de frequence :
+      Il y a des renvois repetes sur cette conversation. Causes classiques par
+      ordre de frequence :
       1. Lien sature (uplink, interco) : verifier l'utilisation des interfaces
       2. Erreurs physiques : compteurs CRC/errors des switchs sur le chemin,
          duplex mismatch, cable/SFP fatigue
       3. Wi-Fi ou lien radio dans le chemin
       4. Equipement qui drop en limite de capacite (CPU firewall, QoS).
+
+      OU CHERCHER, ET LE PIEGE : le sens des retransmissions (c2s = vers le
+      serveur, s2c = vers le client) ne designe le cote perdant que pour les
+      renvois dont le recepteur n'avait PAS encore acquitte les octets. Ici,
+      {retrans_deja_acquittees} des {retrans_total} renvois portaient des octets
+      deja acquittes : pour ceux-la, la capture PROUVE que le sens aller a
+      livre. Si ce nombre est proche du total, ne pas chercher sur le chemin
+      aller — regarder le chemin de RETOUR (acquittements perdus, routage
+      asymetrique) ou un RTO trop court chez l'emetteur apres un pic de latence.
     title_en: "Significant packet loss on the path"
     evidence_en:
-      - "{retrans_total} retransmissions out of {pkts_total} packets ({retrans_rate:.1%}) — c2s: {retrans_c2s}, s2c: {retrans_s2c}"
-      - "Dup-ACK bursts: client {dup_ack_bursts_from_client}, server {dup_ack_bursts_from_server}"
+      - "{retrans_total} retransmissions out of {retrans_base} data segments ({retrans_rate:.1%}) in {retrans_events} episodes — c2s: {retrans_c2s}, s2c: {retrans_s2c}"
+      - "Dup-ACK bursts: client {dup_ack_bursts_from_client}, server {dup_ack_bursts_from_server}; resends carrying already-acknowledged bytes: {retrans_deja_acquittees}"
     remediation_en: |
-      There is loss on the path. The direction of the retransmissions says
-      where to look (c2s = loss towards the server, s2c = loss towards the
-      client). Usual causes, most frequent first:
+      There are repeated resends on this conversation. Usual causes, most
+      frequent first:
       1. Saturated link (uplink, interconnect): check interface utilisation
       2. Physical errors: CRC/error counters on the switches along the path,
          duplex mismatch, worn cable/SFP
       3. Wi-Fi or a radio link on the path
       4. A device dropping at its capacity limit (firewall CPU, QoS).
+
+      WHERE TO LOOK, AND THE TRAP: the direction of the retransmissions (c2s =
+      towards the server, s2c = towards the client) only points at the losing
+      side for resends whose bytes the receiver had NOT yet acknowledged. Here,
+      {retrans_deja_acquittees} of the {retrans_total} resends carried bytes
+      that were already acknowledged: for those, the capture PROVES the forward
+      path delivered. If that number is close to the total, do not look at the
+      forward path — look at the RETURN path (lost acknowledgements, asymmetric
+      routing) or at a too-short RTO on the sender after a latency spike.
+
+  # Le chemin MORT. Ni retrans-heavy (qui annonce un taux sur une session qui
+  # travaille) ni perte-rafale-unique (qui dit « la session s'en est remise »)
+  # ne decrivent ce que montre cette capture : le meme segment reparti trois
+  # fois ou plus, en backoff RTO, jamais acquitte, et plus rien apres. Sans
+  # cette regle, ces flux tombaient dans perte-rafale-unique — UN episode, en
+  # effet, parce qu'un episode qui ne se referme jamais en est un — et l'outil
+  # rendait « une seule rafale, la session s'en est remise », AMBIGU, confiance
+  # faible, sur une conversation ou plus rien ne passait (revue adverse du
+  # 08/08/2026).
+  #
+  # Priorite 82 : au-dessus de retrans-heavy (80), dont le taux garde un sens
+  # ici mais dont la remediation parle a un admin qui cherche un lien fatigue,
+  # pas un chemin coupe. Les deux peuvent sortir ensemble, elles ne se
+  # contredisent pas.
+  - id: perte-sans-reprise
+    verdict: RESEAU
+    priority: 82
+    confidence: moyenne
+    title: "Renvois en backoff jamais acquittes : plus rien ne passe"
+    when:
+      all:
+        - "retrans_total >= 3"
+        # Le MEME segment, trois fois au moins : c'est le RTO qui double, pas
+        # une perte repartie sur la fenetre.
+        - "retrans_meme_segment_max >= 3"
+        - "retrans_meme_segment_jamais_acquitte == true"
+        # Etale dans le temps : un fast retransmit renvoie les memes octets en
+        # quelques millisecondes et n'est pas ce dont on parle ici.
+        - "retrans_meme_segment_span_s >= 0.5"
+        # La capture ne montre AUCUN retablissement, dans aucun sens.
+        - "reprise_apres_perte == false"
+        # Une session qui se termine par un FIN a livre ce qu'elle avait a
+        # livrer : la queue non acquittee d'une cloture n'est pas un chemin
+        # mort.
+        - "closed_by != fin"
+    evidence:
+      - "Le meme segment renvoye {retrans_meme_segment_max} fois sur {retrans_meme_segment_span_s:.1f} s, jamais acquitte — {retrans_total} renvois au total, {retrans_base} segments de donnees, cloture: {closed_by}"
+      - "Aucune reprise dans la capture : apres le dernier renvoi, {server} n'a plus acquitte un seul octet de {client}"
+    remediation: |
+      CE QUE MONTRE LA CAPTURE : l'emetteur a reemis le meme segment en
+      doublant son delai a chaque fois (backoff RTO) et n'a JAMAIS recu
+      d'acquittement. Le transfert ne s'est pas degrade, il s'est arrete.
+
+      Ne pas lire cette ligne comme un taux de perte : ce n'est pas un lien qui
+      laisse tomber quelques paquets, c'est un chemin qui n'en laisse plus
+      passer un seul dans ce sens.
+
+      Les trois causes, dans l'ordre ou elles se verifient :
+      1. TROU NOIR DE MTU : verifier si les segments bloques sont les GROS. Si
+         un ICMP 'fragmentation needed' apparait dans la capture, la regle
+         MTU le dit deja ; s'il n'y en a pas, c'est le cas classique — l'ICMP
+         est filtre en amont et rien ne signale la MTU. Tester avec
+         'ping -M do -s 1400' vers {server}.
+      2. EQUIPEMENT A ETATS qui a perdu la session (firewall, NAT, load
+         balancer apres un basculement) : il laisse passer l'aller et jette le
+         retour, ou l'inverse. Comparer avec une NOUVELLE connexion vers le
+         meme service : si elle marche, c'est l'etat, pas le chemin.
+      3. LE PAIR NE REPOND PLUS : {server} a redemarre, sature, ou perdu sa
+         route de retour. Le verifier avant de faire ouvrir un ticket
+         operateur, c'est la verification la moins chere des trois.
+    title_en: "Backoff resends never acknowledged: nothing is getting through"
+    evidence_en:
+      - "The same segment resent {retrans_meme_segment_max} times over {retrans_meme_segment_span_s:.1f} s, never acknowledged — {retrans_total} resends in total, {retrans_base} data segments, close: {closed_by}"
+      - "No recovery anywhere in the capture: after the last resend, {server} did not acknowledge a single further byte from {client}"
+    remediation_en: |
+      WHAT THE CAPTURE SHOWS: the sender re-sent the same segment, doubling its
+      delay each time (RTO backoff), and NEVER got an acknowledgement. The
+      transfer did not degrade, it stopped.
+
+      Do not read this line as a loss rate: this is not a link dropping a few
+      packets, it is a path that no longer passes a single one in this
+      direction.
+
+      The three causes, in the order they are cheapest to check:
+      1. MTU BLACK HOLE: check whether the blocked segments are the LARGE ones.
+         If an ICMP 'fragmentation needed' shows up in the capture, the MTU rule
+         already says so; if there is none, this is the classic case — the ICMP
+         is filtered upstream and nothing signals the MTU. Test with
+         'ping -M do -s 1400' towards {server}.
+      2. A STATEFUL DEVICE that lost the session (firewall, NAT, load balancer
+         after a failover): it passes one direction and drops the other. Compare
+         with a NEW connection to the same service: if that works, it is the
+         state, not the path.
+      3. THE PEER STOPPED ANSWERING: {server} restarted, saturated, or lost its
+         return route. Checking that before opening a carrier ticket is the
+         cheapest of the three.
 
   - id: slow-app-likely
     verdict: APP
@@ -354,6 +529,17 @@ rules:
         # pas prouver que le delai est dans l'app, mais zero perte + transport
         # propre rendent le reseau tres improbable.
         - "server_ack_delay_ms_p95 == none"
+    unless:
+      # Meme garde que slow-app-proven, et pour la meme raison : cette regle
+      # conclut elle aussi « la cause la plus probable est applicative » alors
+      # qu'une fenetre client fermee explique le delai a elle seule. Meme
+      # conditionnement, aussi : « a elle seule » se prouve par le recouvrement
+      # temporel et la part de l'attente, jamais par un maximum de durees (voir
+      # le detail sous slow-app-proven).
+      - all:
+          - "zw_max_ms_from_client >= 100"
+          - "zw_client_attente_ms >= 100"
+          - "zw_client_part_attente >= 0.5"
     evidence:
       - "{exchanges} echanges, reponse en {ttfb_ms_p50:.0f} ms (p50) / {ttfb_ms_p95:.0f} ms (p95), transport propre (0 perte, RTT p50 {rtt_ms_p50:.1f} ms)"
     remediation: |
@@ -397,8 +583,59 @@ rules:
         - "rtt_ms_min > 0"
         - "rtt_ms_p50 >= 20"
         - "rtt_ratio_p50_min >= 4"
+    unless:
+      # DEUX EXPLICATIONS MESUREES du plateau, autres que le chemin. Chacune
+      # doit etre prouvee ENTIEREMENT ; « toutes les mesures hautes sont des ACK
+      # purs » ne suffit pas et ne suffisait deja pas.
+      #
+      # Sans cette garde, un simple abonnement (MQTT, tail de logs, flux de
+      # cotations) sur un LAN a 0,4 ms sortait « congestion probable »,
+      # RESEAU — et la meme ligne s'imprimait sous le verdict HOTE de
+      # zero_window.pcap, la capture de validation de l'outil : deux verdicts
+      # opposes sur la meme conversation, dont un seul declenche un ticket.
+      #
+      # Mais dans sa premiere forme — le seul « ACK pur » — elle rendait l'outil
+      # AVEUGLE a toute congestion sur un transfert unidirectionnel : dans un
+      # telechargement, une sauvegarde, un upload, le recepteur n'a jamais rien
+      # a piggybacker, donc 100 % de ses acquittements sont purs PAR
+      # CONSTRUCTION. Une congestion reelle a 150 ms ressortait « Transport
+      # sain », confiance haute (revue adverse du 08/08/2026).
+      #
+      # Ces deux ancres sont reprises TELLES QUELLES par
+      # latence-mesuree-sur-ack-purs et par `clean` : les trois regles se
+      # partagent exactement l'espace — plateau explique et queue reelle,
+      # plateau explique et queue plate, plateau inexplique — et un alias YAML
+      # rend impossible qu'elles divergent au prochain reglage de seuil.
+      #
+      # La gigue reelle ne s'y arme JAMAIS : elle retarde aussi les segments de
+      # donnees. Verifie flux par flux sur jitter.pcap (netem, vrai kernel).
+      - &plateau_delayed_ack
+        all:
+          # 1. Rien d'autre qu'un acquittement ne porte les mesures hautes.
+          - "rtt_haut_porte_par_ack_purs == true"
+          # 2. Le recepteur POUVAIT armer un timer : chaque mesure haute
+          #    acquitte un segment SEUL en vol. La RFC 1122 impose l'ACK
+          #    immediat des deux segments pleins non acquittes — un ACK qui en
+          #    couvre deux n'a donc attendu aucun timer, et c'est ce qui separe
+          #    un abonnement au ralenti d'un telechargement congestionne.
+          - "rtt_haut_sur_segment_isole == true"
+          # 3. La grandeur reste celle d'un timer. 40 ms sous Linux, 200 ms
+          #    sous Windows ; 500 ms laisse la marge de l'ordonnancement. Une
+          #    pile TCP ne retient pas un acquittement une seconde : au-dela,
+          #    l'attente vient du chemin, et le verdict RESEAU doit revenir.
+          - "rtt_haut_max_ms <= 500"
+      - &plateau_fenetre_saturee
+        all:
+          - "rtt_haut_porte_par_ack_purs == true"
+          # Le tampon de reception etait effondre a chaque mesure haute : un
+          # recepteur qui ne peut plus rien accepter ne peut rien acquitter, et
+          # ce qu'on mesure est sa saturation. C'est le cas de zero_window.pcap
+          # (fenetre serveur 8688 -> 1448 -> 0), ou le verdict juste est HOTE.
+          - "rtt_haut_sous_fenetre_saturee == true"
     evidence:
-      - "RTT min {rtt_ms_min:.1f} ms mais p95 {rtt_ms_p95:.1f} ms (x{rtt_ratio_p95_min:.0f}) sur {pkts_total} paquets"
+      # « sur {pkts_total} paquets » laissait croire que le percentile reposait
+      # sur autant de mesures : les flux du lab font 25 paquets pour 4 mesures.
+      - "RTT min {rtt_ms_min:.1f} ms mais p95 {rtt_ms_p95:.1f} ms (x{rtt_ratio_p95_min:.0f}) sur {rtt_samples} mesures de RTT"
     remediation: |
       Le chemin existe et fonctionne, mais sa latence explose par moments :
       files d'attente qui se remplissent (congestion, bufferbloat), lien
@@ -406,7 +643,7 @@ rules:
       Croiser l'horaire des pics avec les graphes d'utilisation des liens.
     title_en: "Unstable latency: heavy jitter (congestion likely)"
     evidence_en:
-      - "RTT min {rtt_ms_min:.1f} ms but p95 {rtt_ms_p95:.1f} ms (x{rtt_ratio_p95_min:.0f}) over {pkts_total} packets"
+      - "RTT min {rtt_ms_min:.1f} ms but p95 {rtt_ms_p95:.1f} ms (x{rtt_ratio_p95_min:.0f}) over {rtt_samples} RTT measurements"
     remediation_en: |
       The path exists and works, but its latency spikes at times: queues
       filling up (congestion, bufferbloat), a shared link saturated by other
@@ -447,6 +684,230 @@ rules:
          the side that sent the RST).
       The side that sent the RST ({rst_emitter}) says where to start.
 
+  # Le pendant de retrans-heavy (priorite 80) quand tout ce qui a ete compte
+  # vient d'un SEUL hoquet. Le fait reste vrai et doit rester dit : des segments
+  # n'ont pas ete acquittes a un instant date, et si l'utilisateur s'est plaint
+  # a cette seconde-la, c'est la piste. Ce qui disparait, c'est le TAUX — un
+  # pourcentage tire d'un evenement unique n'a pas d'intervalle de confiance —
+  # et la confiance haute qui le fait recopier dans un ticket operateur.
+  # Priorite 62 : sous rst-midstream, tres loin des 80 de retrans-heavy.
+  - id: perte-rafale-unique
+    verdict: AMBIGU
+    priority: 62
+    confidence: faible
+    title: "Une seule rafale de pertes, pas un taux de perte"
+    when:
+      all:
+        - "retrans_rate >= 0.03"
+        - "retrans_total >= 5"
+        - "perte_evenement_unique == true"
+    evidence:
+      - "{retrans_total} segments renvoyes, tous dans un SEUL episode ({retrans_events}) — {client}:{cport} -> {server}:{sport}, {retrans_base} segments de donnees au total, cloture: {closed_by}"
+      # La preuve du retablissement, et non son affirmation : la remediation
+      # dit « la session s'en est remise », il faut que la ligne au-dessus le
+      # montre. Sans elle, la meme phrase s'imprimait sur des chemins morts.
+      - "Reprise constatee apres le dernier renvoi, c'est-a-dire de nouveaux octets acquittes par le pair : {reprise_apres_perte}"
+      - "Rafales de dup-ACK : client {dup_ack_bursts_from_client}, serveur {dup_ack_bursts_from_server}"
+    remediation: |
+      LE FAIT : a un instant, {retrans_total} segments en vol n'ont pas ete
+      acquittes et sont repartis ensemble. Cela arrive pour de bonnes raisons —
+      une file qui deborde le temps d'une rafale, un basculement de trunk ou de
+      firewall, un roaming Wi-Fi, une reconvergence de routage.
+
+      LA SESSION S'EN EST-ELLE REMISE ? La ligne de preuve « Reprise constatee »
+      ci-dessus repond, et c'est une mesure, pas une hypothese : le pair a-t-il
+      acquitte de NOUVEAUX octets apres le dernier renvoi ? Si oui, l'incident
+      est passe et ce qui suit s'applique. Si non, ne pas lire cette ligne comme
+      un incident clos — la capture s'arrete sans avoir vu quoi que ce soit
+      repasser, et c'est un tout autre probleme (voir perte-sans-reprise si la
+      capture montre le meme segment renvoye en boucle).
+
+      CE QUE CETTE CAPTURE NE DIT PAS : un taux de perte. Un seul evenement ne
+      permet aucune extrapolation ; le meme flux capture une minute plus tot ou
+      plus tard aurait pu n'en montrer aucun. Ne PAS ouvrir de ticket operateur
+      ni faire changer de cable sur ce seul element — c'est ce que le taux
+      affiche jusqu'ici invitait a faire.
+
+      POUR TRANCHER, dans l'ordre de cout :
+      1. L'heure de la rafale correspond-elle a la plainte de l'utilisateur ?
+         Si oui, chercher ce qui s'est passe a CET instant (logs d'equipement,
+         bascule, saturation ponctuelle) plutot qu'un defaut permanent.
+      2. Refaire une capture plus longue : c'est le nombre d'EPISODES sur la
+         duree, pas le nombre de segments d'un episode, qui fait un taux.
+      3. Si d'autres flux de la meme capture montrent une rafale au meme
+         instant, l'evenement est sur le chemin partage — la, il est reel et
+         date.
+    title_en: "A single burst of losses, not a loss rate"
+    evidence_en:
+      - "{retrans_total} segments resent, all within a SINGLE episode ({retrans_events}) — {client}:{cport} -> {server}:{sport}, {retrans_base} data segments in total, close: {closed_by}"
+      - "Recovery observed after the last resend, meaning new bytes acknowledged by the peer: {reprise_apres_perte}"
+      - "Dup-ACK bursts: client {dup_ack_bursts_from_client}, server {dup_ack_bursts_from_server}"
+    remediation_en: |
+      THE FACT: at one instant, {retrans_total} in-flight segments were not
+      acknowledged and were resent together. That happens for good reasons — a
+      queue overflowing for the length of a burst, a trunk or firewall
+      failover, Wi-Fi roaming, a routing reconvergence.
+
+      DID THE SESSION RECOVER? The "Recovery observed" evidence line above
+      answers that, and it is a measurement, not an assumption: did the peer
+      acknowledge NEW bytes after the last resend? If it did, the incident is
+      over and what follows applies. If it did not, do not read this line as a
+      closed incident — the capture stops without having seen anything get
+      through again, which is an entirely different problem (see
+      perte-sans-reprise if the capture shows the same segment resent in a
+      loop).
+
+      WHAT THIS CAPTURE DOES NOT SAY: a loss rate. A single event allows no
+      extrapolation; the same flow captured a minute earlier or later might
+      have shown none. Do NOT open a carrier ticket or have a cable replaced on
+      this evidence alone — which is exactly what the rate displayed so far
+      invited.
+
+      TO DECIDE, in order of cost:
+      1. Does the time of the burst match the user's complaint? If so, look for
+         what happened at THAT instant (device logs, a failover, a momentary
+         saturation) rather than for a permanent fault.
+      2. Take a longer capture: it is the number of EPISODES over time, not the
+         number of segments in one episode, that makes a rate.
+      3. If other flows in the same capture show a burst at the same instant,
+         the event is on the shared path — there, it is real and dated.
+
+  # Le pendant de rtt-degraded (priorite 70) quand la queue de latence est
+  # reelle mais que TOUTES les mesures hautes sont portees par des ACK purs.
+  # Meme forme et meme raison que latency-tail-unexplained : deux causes
+  # produisent cette signature et la capture ne les separe pas. La difference
+  # est la mediane — celle-ci est haute, donc latency-tail-unexplained (qui
+  # exige une mediane saine) ne peut pas ramasser ce flux.
+  #
+  # Cette regle existe pour qu'aucun flux ne tombe entre rtt-degraded (inhibe)
+  # et `clean` (qui exige une queue plate) : `clean` prend les p95/p50 < 2,
+  # celle-ci prend les >= 2, elles couvrent l'espace sans trou ni recouvrement.
+  - id: latence-mesuree-sur-ack-purs
+    verdict: AMBIGU
+    priority: 24
+    confidence: faible
+    title: "Latence elevee, mesuree uniquement sur des acquittements"
+    when:
+      all:
+        - "rtt_ms_min > 0"
+        - "rtt_ms_p50 >= 20"
+        - "rtt_ratio_p50_min >= 4"
+        # EXACTEMENT ce qui inhibe rtt-degraded, par alias : le plateau a une
+        # explication mesuree autre que le chemin — le timer d'acquittement du
+        # recepteur, ou son tampon sature.
+        - any:
+            - *plateau_delayed_ack
+            - *plateau_fenetre_saturee
+        # Une VRAIE queue en plus du plateau ; sans elle, `clean` couvre deja.
+        - "rtt_ratio_p95_p50 >= 2"
+    evidence:
+      - "RTT median {rtt_ms_p50:.1f} ms, p95 {rtt_ms_p95:.1f} ms (x{rtt_ratio_p95_p50:.0f}) sur {rtt_samples} mesures — toutes celles au-dessus de 20 ms sont portees par des ACK purs, aucune par un segment de donnees"
+    remediation: |
+      DEUX CAUSES produisent exactement cette signature et cette capture ne
+      permet PAS de les separer — d'ou le verdict ambigu plutot qu'un
+      diagnostic reseau qui aurait une chance sur deux d'etre faux :
+
+      1. DELAYED ACK du recepteur : un timer de 40 ms (Linux) a 200 ms
+         (Windows) retarde les ACK purs quand le recepteur n'a rien a repondre.
+         Le chemin est alors hors de cause, et c'est la lecture la plus
+         probable ici : PAS UNE SEULE mesure haute n'est portee par un segment
+         de donnees, alors qu'une gigue du chemin les retarderait aussi.
+      2. GIGUE DU CHEMIN qui, par construction de ce flux, ne frappe que le
+         sens portant les acquittements.
+
+      POUR TRANCHER, dans l'ordre de cout :
+      1. Un `ping -i 0.2` de 60 s vers {server} pendant l'incident : si la
+         gigue apparait aussi en ICMP, c'est le chemin. Sinon c'est le timer.
+      2. Comparer avec un flux de la meme capture qui transporte des donnees
+         dans les deux sens : lui montrerait la gigue du chemin, s'il y en a.
+      3. Cote recepteur, TCP_QUICKACK (ou la desactivation du delayed ACK)
+         fait disparaitre la signature si c'etait le timer.
+
+      Ne PAS ouvrir de ticket operateur sur ce seul element.
+    title_en: "High latency, measured only on acknowledgements"
+    evidence_en:
+      - "Median RTT {rtt_ms_p50:.1f} ms, p95 {rtt_ms_p95:.1f} ms (x{rtt_ratio_p95_p50:.0f}) over {rtt_samples} measurements — every one above 20 ms is carried by a pure ACK, none by a data segment"
+    remediation_en: |
+      TWO CAUSES produce exactly this signature and this capture CANNOT
+      separate them — hence an ambiguous verdict rather than a network
+      diagnosis that would have a one-in-two chance of being wrong:
+
+      1. DELAYED ACK on the receiver: a timer of 40 ms (Linux) to 200 ms
+         (Windows) holds back pure ACKs when the receiver has nothing to send
+         back. The path is then not at fault, and that is the more likely
+         reading here: NOT ONE high measurement is carried by a data segment,
+         whereas path jitter would delay those too.
+      2. PATH JITTER which, given how this flow is shaped, only hits the
+         direction carrying the acknowledgements.
+
+      TO DECIDE, in order of cost:
+      1. A 60 s `ping -i 0.2` towards {server} during the incident: if the
+         jitter also shows up in ICMP, it is the path. Otherwise it is the
+         timer.
+      2. Compare with a flow in the same capture that carries data in both
+         directions: it would show path jitter, if there is any.
+      3. On the receiver, TCP_QUICKACK (or disabling delayed ACK) makes the
+         signature disappear if the timer was the cause.
+
+      Do NOT open a carrier ticket on this evidence alone.
+
+  # Le pendant de reject-icmp (priorite 92) pour une session qui, elle, s'est
+  # bel et bien etablie. Le FAIT reste vrai et doit rester dit — un equipement
+  # nomme rejette du trafic de cette conversation — c'est l'HISTOIRE qui etait
+  # fausse. Priorite 64 : sous rst-midstream, et surtout tres loin de 92, parce
+  # qu'un flux qui a fonctionne ne doit jamais passer devant un flux en panne
+  # dans le rapport ni manger une place de --top.
+  - id: reject-icmp-session-etablie
+    verdict: AMBIGU
+    priority: 64
+    confidence: moyenne
+    title: "Trafic rejete par un equipement, mais la session s'est etablie"
+    when:
+      all:
+        - "icmp_admin_prohibited == true"
+        - "established_seen == true"
+    evidence:
+      - "ICMP administratively-prohibited emis par {icmp_admin_prohibited_from} pour {client}:{cport} -> {server}:{sport} — pourtant la session s'est etablie et a echange {bytes_c2s}o c2s / {bytes_s2c}o s2c (cloture: {closed_by})"
+    remediation: |
+      La connexion n'a PAS ete refusee : elle s'est etablie et a transporte des
+      donnees. Mais {icmp_admin_prohibited_from} a rejete par politique au moins
+      un paquet de cette conversation. Deux lectures, que cette capture ne
+      separe pas — d'ou le verdict ambigu :
+
+      1. LE REJET A COMPTE : regarder ce qui suit l'ICMP dans la capture. Si les
+         echanges s'arretent ou repartent en retransmission juste apres, la
+         politique de {icmp_admin_prohibited_from} est bien la cause du symptome.
+      2. LE REJET EST COLLATERAL : chemin a plusieurs routes (ECMP, VRRP,
+         bascule de firewall) ou table d'etats expiree sur un brin. Un paquet a
+         emprunte le brin qui ne connait pas cette connexion, le reste est passe
+         ailleurs. La session survit, mais la configuration est incoherente
+         entre les brins — cela cassera le jour ou tout basculera sur celui-la.
+
+      Dans les deux cas la regle a chercher est sur {icmp_admin_prohibited_from},
+      pour le couple {client}:{cport} -> {server}:{sport}. Ne PAS chercher
+      cote application ni cote {server} : ils ont fait leur travail.
+    title_en: "Traffic rejected by a device, yet the session did establish"
+    evidence_en:
+      - "ICMP administratively-prohibited sent by {icmp_admin_prohibited_from} for {client}:{cport} -> {server}:{sport} — yet the session established and exchanged {bytes_c2s}B c2s / {bytes_s2c}B s2c (close: {closed_by})"
+    remediation_en: |
+      The connection was NOT refused: it established and carried data. But
+      {icmp_admin_prohibited_from} rejected at least one packet of this
+      conversation by policy. Two readings, which this capture does not
+      separate — hence the ambiguous verdict:
+
+      1. THE REJECT MATTERED: look at what follows the ICMP in the capture. If
+         the exchanges stop, or resume only through retransmissions right after
+         it, the policy on {icmp_admin_prohibited_from} is the cause.
+      2. THE REJECT IS COLLATERAL: multi-path routing (ECMP, VRRP, firewall
+         failover) or an expired state table on one leg. One packet took the leg
+         that does not know this connection, the rest went elsewhere. The
+         session survives, but the configuration differs between legs — it will
+         break the day everything moves onto that one.
+
+      Either way the rule to look for lives on {icmp_admin_prohibited_from}, for
+      {client}:{cport} -> {server}:{sport}. Do NOT look at the application or at
+      {server}: they did their job.
+
   - id: latency-tail-unexplained
     verdict: AMBIGU
     priority: 25
@@ -475,7 +936,7 @@ rules:
         # 60 ms sur une mediane de 15 ms est une vraie queue.
         - "rtt_ratio_p95_p50 >= 2"
     evidence:
-      - "RTT median {rtt_ms_p50:.1f} ms mais p95 {rtt_ms_p95:.1f} ms (x{rtt_ratio_p95_p50:.0f}) : la latence pique sans que la capture puisse dire pourquoi"
+      - "RTT median {rtt_ms_p50:.1f} ms mais p95 {rtt_ms_p95:.1f} ms (x{rtt_ratio_p95_p50:.0f}) sur {rtt_samples} mesures : la latence pique sans que la capture puisse dire pourquoi"
     remediation: |
       DEUX CAUSES produisent exactement cette signature et cette capture ne
       permet PAS de les separer — d'ou le verdict ambigu plutot qu'un
@@ -496,7 +957,7 @@ rules:
       Ne PAS ouvrir de ticket operateur sur ce seul element.
     title_en: "Latency spikes the capture cannot attribute"
     evidence_en:
-      - "Median RTT {rtt_ms_p50:.1f} ms but p95 {rtt_ms_p95:.1f} ms (x{rtt_ratio_p95_p50:.0f}): latency spikes without the capture being able to say why"
+      - "Median RTT {rtt_ms_p50:.1f} ms but p95 {rtt_ms_p95:.1f} ms (x{rtt_ratio_p95_p50:.0f}) over {rtt_samples} measurements: latency spikes without the capture being able to say why"
     remediation_en: |
       TWO CAUSES produce exactly this signature and this capture CANNOT
       separate them — hence an ambiguous verdict rather than a network
@@ -516,6 +977,72 @@ rules:
          path: shared jitter = the path.
 
       Do NOT open a carrier ticket on this evidence alone.
+
+  # Le pendant de mtu-blackhole quand l'emetteur a REDUIT son calibre. Rien
+  # n'est casse ici, et c'est tout l'interet de le dire a voix basse plutot que
+  # de se taire : la MTU reduite est reelle, et elle ne tient qu'au fait que
+  # l'ICMP type 3 code 4 remonte. Le jour ou un equipement le filtre, ce meme
+  # chemin devient un trou noir — sans aucun signal. Priorite 20 : sous tous
+  # les diagnostics de panne, au-dessus de `clean` qui, lui, ne mentionnerait
+  # pas la MTU.
+  - id: mtu-decouverte-reussie
+    verdict: AMBIGU
+    priority: 20
+    confidence: faible
+    title: "MTU reduite sur le chemin, absorbee par la decouverte automatique"
+    when:
+      all:
+        - "icmp_frag_needed == true"
+        # Ce champ exige desormais DEUX preuves : le calibre a baisse, ET le
+        # pair a acquitte les octets emis apres l'erreur. Reduire n'est pas
+        # livrer — un emetteur qui descend de 1460 a 1400 derriere un lien a
+        # 1300 a fait ce qu'on lui demandait et reste dans le trou noir.
+        - "frag_needed_ignored == false"
+        # Redit ici, en clair, parce que c'est la phrase « la session a
+        # poursuivi » de la preuve ci-dessous qui en depend.
+        - "progres_apres_frag_needed == true"
+    evidence:
+      - "ICMP 'fragmentation needed' recu pour {client}:{cport} -> {server}:{sport}, puis l'emetteur est passe de {seg_max_before_frag_needed} a {seg_max_after_frag_needed} octets de charge utile — et le pair a ACQUITTE ces octets-la : la session a poursuivi ({bytes_c2s}o c2s / {bytes_s2c}o s2c, cloture: {closed_by})"
+    remediation: |
+      RIEN A CORRIGER SUR CE FLUX : un lien du chemin a une MTU plus petite
+      (tunnel VPN, PPPoE, IPsec), l'emetteur en a ete informe et a reduit ses
+      segments. C'est le mecanisme normal, il a fonctionne.
+
+      Ce que cette ligne signale, c'est une FRAGILITE, pas une panne : tout
+      repose sur le retour de l'ICMP type 3 code 4. Si un equipement ou un
+      filtre le bloque — un cas frequent, l'ICMP etant souvent coupe « par
+      securite » — le meme chemin devient un trou noir et les gros transferts
+      gelent sans le moindre message.
+
+      A verifier une fois, pas en urgence :
+      1. La MTU/le clamp de MSS annonces par l'equipement de tunnel sont-ils
+         coherents avec les {seg_max_after_frag_needed} octets observes ici ?
+         Clamper le MSS supprime l'aller-retour ICMP a chaque connexion.
+      2. Les ACL du chemin laissent-elles passer l'ICMP type 3 code 4 dans les
+         DEUX sens ?
+      Si un AUTRE flux de cette capture gele sur les gros transferts sans
+      recevoir cet ICMP, c'est exactement le scenario ci-dessus.
+    title_en: "Reduced MTU on the path, absorbed by automatic discovery"
+    evidence_en:
+      - "ICMP 'fragmentation needed' received for {client}:{cport} -> {server}:{sport}, then the sender went from {seg_max_before_frag_needed} to {seg_max_after_frag_needed} bytes of payload — and the peer ACKNOWLEDGED those bytes: the session carried on ({bytes_c2s}B c2s / {bytes_s2c}B s2c, close: {closed_by})"
+    remediation_en: |
+      NOTHING TO FIX ON THIS FLOW: a link on the path has a smaller MTU (VPN
+      tunnel, PPPoE, IPsec), the sender was told about it and reduced its
+      segments. That is the normal mechanism, and it worked.
+
+      What this line reports is FRAGILITY, not a failure: everything depends on
+      the ICMP type 3 code 4 getting back. If a device or a filter blocks it —
+      a common case, since ICMP is often cut off "for security" — the same path
+      becomes a black hole and large transfers freeze with no message at all.
+
+      Worth checking once, not urgently:
+      1. Are the MTU / MSS clamp advertised by the tunnel device consistent
+         with the {seg_max_after_frag_needed} bytes observed here? Clamping the
+         MSS removes the ICMP round trip on every connection.
+      2. Do the ACLs along the path let ICMP type 3 code 4 through in BOTH
+         directions?
+      If ANOTHER flow in this capture freezes on large transfers without
+      receiving this ICMP, that is exactly the scenario described above.
 
   - id: clean
     verdict: RAS
