@@ -43,14 +43,23 @@ jobs:
   fuseau-decale:
     # Le bug d'ancre RFC3164 ne se voit QUE a l'ouest de Greenwich : depuis
     # Paris la suite etait verte avec le defaut en place.
-    name: TZ America/New_York (${{ matrix.os }})
+    #
+    # La valeur DIFFERE par OS, et c'est une mesure qui l'impose (15/08/2026) :
+    # le CRT Windows ne comprend pas les noms IANA. Avec TZ=America/New_York
+    # sur une machine reglee sur Paris, l'offset observe passe de +02:00 a
+    # +01:00 - toujours a l'EST de Greenwich. Ce job ne couvrait donc PAS, sous
+    # Windows, le defaut qu'il vise. La forme POSIX `EST5EDT` est comprise par
+    # le CRT et donne un vrai -04:00 (verifie a l'execution).
+    name: TZ decale (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        include:
+          - { os: ubuntu-latest, tz: "America/New_York" }
+          - { os: windows-latest, tz: "EST5EDT" }
     env:
-      TZ: America/New_York
+      TZ: ${{ matrix.tz }}
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
