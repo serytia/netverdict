@@ -24,6 +24,13 @@ from typing import BinaryIO, Iterator, Optional
 
 import dpkt
 
+from .dns import DNS_PORTS, DnsMsg, parse_dns_datagram
+
+# Plafond des octets conserves par segment TCP/53. Une reponse DNS sur TCP
+# peut atteindre 64 Ko, mais celles qui comptent en diagnostic (une zone qui a
+# grossi, un AXFR refuse) tiennent tres en dessous : 8 Ko bornent la memoire
+# sans rien perdre d'utile.
+MAX_TCP_PAYLOAD_KEPT = 8192
 from .i18n import DEFAULT_LANG, t
 
 # Linktypes rencontres en pratique sur les captures d'admins.
@@ -53,6 +60,13 @@ class TcpPkt:
     payload_len: int
     ip_id: int                    # utile pour reperer les doublons de capture
     ws_opt: Optional[int] = None  # option window-scale si presente (SYN/SYNACK)
+    # Octets applicatifs, conserves UNIQUEMENT pour le port 53. Les garder
+    # partout multiplierait par mille l'empreinte memoire d'une grosse capture
+    # (un million de segments a 1400 octets), pour un outil qui ne lit
+    # deliberement aucun contenu applicatif ailleurs. Le DNS sur TCP fait
+    # exception parce que c'est le repli obligatoire d'une reponse tronquee :
+    # sans ces octets, on sait qu'un repli a eu lieu mais pas ce qu'il a donne.
+    payload: bytes = b""
 
     @property
     def syn(self) -> bool: return bool(self.flags & dpkt.tcp.TH_SYN)
@@ -84,10 +98,16 @@ class IcmpEvent:
     orig_dport: int
     type: int
     code: int
+    # Protocole du paquet FAUTIF (6 = TCP, 17 = UDP). Sans lui, le rattachement
+    # ne se fait que sur le quadruplet : une erreur concernant un datagramme
+    # UDP pourrait etre collee a une conversation TCP portant par hasard les
+    # memes ports, et surtout les erreurs UDP n'avaient nulle part ou aller.
+    orig_proto: int = 0
 
     # Codes ICMPv4 type 3 qui signent un refus administratif (REJECT).
     ADMIN_PROHIBITED = {9, 10, 13}
     FRAG_NEEDED = 4
+    PORT_UNREACHABLE = 3
 
     @property
     def is_admin_prohibited(self) -> bool:
@@ -96,6 +116,13 @@ class IcmpEvent:
     @property
     def is_frag_needed(self) -> bool:
         return self.type == 3 and self.code == self.FRAG_NEEDED
+
+    @property
+    def is_port_unreachable(self) -> bool:
+        """« Rien n'ecoute sur ce port » — l'equivalent UDP du RST au SYN.
+        En ICMPv6 c'est le type 1 code 4 (port unreachable)."""
+        return ((self.type == 3 and self.code == self.PORT_UNREACHABLE)
+                or (self.type == 1 and self.code == 4))
 
 
 def _detect_mixed_linktypes(path) -> bool:
@@ -142,10 +169,25 @@ class ParseStats:
 
     total: int = 0
     tcp: int = 0
+    udp: int = 0
     icmp: int = 0
+    # Tout paquet IP dont le transport n'est ni TCP, ni UDP, ni ICMP (GRE,
+    # ESP, IGMP, ou un transport que dpkt a laisse en octets bruts). Existe
+    # pour que la ligne de comptes BOUCLE : avant, un paquet UDP etait lu,
+    # compte dans total, et n'apparaissait dans AUCUNE colonne du rapport.
+    other_ip: int = 0
     non_ip: int = 0
     fragments_skipped: int = 0
     parse_errors: int = 0
+    # Paquets UDP vers ou depuis le port 53, comptes SANS etre decodes :
+    # cette version n'analyse pas le DNS, et une capture qui en contient
+    # merite de l'apprendre. Une resolution lente ou en echec se produit
+    # AVANT le SYN et n'apparait donc dans aucun verdict TCP : sans cette
+    # ligne, le rapport rend un "transport sain" qui se lit "tout va bien".
+    udp_dns: int = 0
+    # Datagrammes UDP/53 dont il ne reste meme pas les douze octets d'en-tete :
+    # comptes a part pour ne pas les faire passer pour du DNS analyse.
+    dns_unreadable: int = 0
     linktype: int = -1
     unsupported_linktype: bool = False
     # Le pcapng declare plusieurs interfaces de linktypes differents : les
@@ -155,10 +197,30 @@ class ParseStats:
 
 
 @dataclass
+class UdpPkt:
+    """Un datagramme UDP. Volontairement pauvre : hors du DNS, tout ce qu'on
+    peut dire honnetement tient dans le quadruplet, l'instant et la taille."""
+
+    ts: float
+    src: str
+    dst: str
+    sport: int
+    dport: int
+    payload_len: int
+
+
+@dataclass
 class Capture:
     tcp_packets: list[TcpPkt] = field(default_factory=list)
+    udp_packets: list[UdpPkt] = field(default_factory=list)
     icmp_events: list[IcmpEvent] = field(default_factory=list)
+    dns_msgs: list["DnsMsg"] = field(default_factory=list)
     stats: ParseStats = field(default_factory=ParseStats)
+    # Horodatage du dernier paquet lu, TOUS protocoles confondus. Distinct de
+    # t_last, qui ne parle que du TCP : une resolution DNS restee sans reponse
+    # doit etre bornee par la fin REELLE de la capture, sinon on la declarerait
+    # « sans reponse » alors que la capture s'est simplement arretee avant.
+    t_last_seen: Optional[float] = None
 
     @property
     def t_first(self) -> Optional[float]:
@@ -270,6 +332,13 @@ def _extract_icmp_event(ts: float, ip, icmp_payload: bytes, icmp_type: int,
         if len(transport) < 4:
             return None
         sport, dport = struct.unpack("!HH", transport[:4])
+        # IPv4 porte le protocole dans `p`, IPv6 dans `nxt`. Une extension
+        # IPv6 rendrait `nxt` non transport, mais un ICMP d'erreur n'embarque
+        # que le debut du paquet : le cas est marginal et se solde par un
+        # rattachement inerte, jamais par une erreur.
+        proto = getattr(orig, "p", None)
+        if proto is None:
+            proto = getattr(orig, "nxt", 0)
         return IcmpEvent(
             ts=ts,
             icmp_src=_ip_str(ip.src),
@@ -279,6 +348,7 @@ def _extract_icmp_event(ts: float, ip, icmp_payload: bytes, icmp_type: int,
             orig_dport=dport,
             type=icmp_type,
             code=icmp_code,
+            orig_proto=int(proto or 0),
         )
     except Exception:
         return None
@@ -309,6 +379,11 @@ def read_capture(path: str | Path, lang: str = DEFAULT_LANG) -> Capture:
 
         for ts, buf in reader:
             st.total += 1
+            # Un max, pas le dernier vu : un pcap issu d'un mergecap n'est pas
+            # forcement dans l'ordre (c'est deja pourquoi les listes sont
+            # triees plus bas).
+            if cap.t_last_seen is None or ts > cap.t_last_seen:
+                cap.t_last_seen = float(ts)
             try:
                 ip = _ip_from_frame(buf, st.linktype)
             except Exception:
@@ -359,6 +434,9 @@ def read_capture(path: str | Path, lang: str = DEFAULT_LANG) -> Capture:
                     payload_len=payload_len,
                     ip_id=getattr(ip, "id", 0),
                     ws_opt=_parse_ws_option(tcp) if (tcp.flags & dpkt.tcp.TH_SYN) else None,
+                    payload=(bytes(tcp.data)[:MAX_TCP_PAYLOAD_KEPT]
+                             if (tcp.sport == 53 or tcp.dport == 53)
+                                and tcp.data else b""),
                 ))
             elif isinstance(data, dpkt.icmp.ICMP):
                 st.icmp += 1
@@ -378,6 +456,37 @@ def read_capture(path: str | Path, lang: str = DEFAULT_LANG) -> Capture:
                                              data.type, data.code)
                     if ev:
                         cap.icmp_events.append(ev)
+            elif isinstance(data, dpkt.udp.UDP):
+                st.udp += 1
+                # Longueur prise dans l'EN-TETE (ulen - 8) et non dans les
+                # octets capturés : sous snaplen, len(data.data) mentirait sur
+                # toutes les tailles - meme raisonnement que pour le TCP.
+                charge_len = (data.ulen - 8) if data.ulen >= 8 \
+                    else len(data.data or b"")
+                cap.udp_packets.append(UdpPkt(
+                    ts=float(ts), src=_ip_str(ip.src), dst=_ip_str(ip.dst),
+                    sport=data.sport, dport=data.dport,
+                    payload_len=max(0, charge_len)))
+                # Le port suffit a reconnaitre le DNS. Les deux sens comptent :
+                # la query part vers 53, la reponse en vient.
+                if data.sport in DNS_PORTS or data.dport in DNS_PORTS:
+                    st.udp_dns += 1
+                    charge = data.data if isinstance(data.data, bytes) \
+                        else bytes(data.data)
+                    # ulen compte l'en-tete UDP (8 octets). L'ecart avec ce qui
+                    # a ete capture EST la troncature du snaplen : c'est la
+                    # seule occasion de la mesurer, l'information n'existe plus
+                    # une fois le paquet oublie.
+                    annonce = (data.ulen - 8) if data.ulen >= 8 else None
+                    msg = parse_dns_datagram(
+                        float(ts), _ip_str(ip.src), _ip_str(ip.dst),
+                        data.sport, data.dport, charge, annonce)
+                    if msg is not None:
+                        cap.dns_msgs.append(msg)
+                    else:
+                        st.dns_unreadable += 1
+            else:
+                st.other_ip += 1
 
     # Les lecteurs livrent normalement dans l'ordre du fichier = ordre de
     # capture, mais un merge de captures (mergecap) peut desordonner :

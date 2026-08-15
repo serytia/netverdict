@@ -174,3 +174,41 @@ class TestCorrelateTable:
         assert suspects[0]["during_flow"] is False
         assert round(suspects[0]["delay_s"]) == 42
         assert "link down" in suspects[0]["message"]
+
+
+def test_une_attribution_hors_du_flux_annonce_la_tolerance_d_horloge():
+    """La tolerance d'horloge est appliquee symetriquement - une derive de
+    30 s entre deux machines est banale - si bien qu'un connect() POSTERIEUR
+    a la fin du flux peut etre retenu. C'est voulu, mais l'attribution repose
+    alors sur cette tolerance et non sur une concordance directe : le rapport
+    doit le dire (revue du 26/07/2026).
+    """
+    from netverdict.correlate import attribution_for
+    from netverdict.signals import FlowSignals
+    from netverdict.rules.engine import FlowVerdict
+    from netverdict.timeline import Timeline, TimelineEvent, ConnectionInfo
+
+    sig = FlowSignals(client="10.0.0.1", server="10.0.0.2", cport=5000,
+                      sport=443, t_first=100.0, duration_s=2.0)
+    fv = FlowVerdict(signals=sig)
+
+    def event(ts):
+        return TimelineEvent(
+            ts=ts, source="sysmon", host="h", category="service", severity=1,
+            ident="sysmon", message="connect", tz_known=True,
+            connection=ConnectionInfo(
+                src_ip="10.0.0.1", src_port=5000, dst_ip="10.0.0.2",
+                dst_port=443, protocol="tcp", image="app.exe", pid=1))
+
+    dedans = attribution_for(fv, Timeline(events=[event(101.0)]))
+    assert dedans is not None and dedans.within_flow is True
+    assert "tolerance" not in dedans.describe("fr")
+
+    # 40 s APRES la fin du flux : retenu, mais signale comme tel.
+    dehors = attribution_for(fv, Timeline(events=[event(142.0)]))
+    assert dehors is not None and dehors.within_flow is False
+    assert "tolerance" in dehors.describe("fr")
+
+    # Et quand les deux existent, celui qui tombe DANS le flux gagne.
+    les_deux = attribution_for(fv, Timeline(events=[event(142.0), event(101.0)]))
+    assert les_deux.within_flow is True

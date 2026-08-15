@@ -18,7 +18,7 @@ an **argued verdict**:
 ```
 $ netverdict analyze capture.pcapng
 
-18 packets read — 18 TCP, 0 ICMP, 0 non-IP, 0 unreadable — 1 conversations
+18 packets read — 18 TCP, 0 UDP, 0 ICMP, 0 other IP, 0 non-IP, 0 fragments, 0 unreadable — 1 conversations
 ┌─────────  APP — 10.0.0.42:51006 -> 10.0.0.5:5432 [high confidence] ─────────┐
 │ Slow application response, reception proven by a fast ACK                   │
 │   * 3 exchanges: server ACK in 5 ms but response in 800 ms (p50), 0 loss    │
@@ -219,11 +219,24 @@ timezone, one with the extras installed, one against the built package.
 
 ## Validation status
 
-- **Validated**: 323 automated tests, green on Linux, Windows and macOS
+- **Validated**: 462 automated tests, green on Linux, Windows and macOS
   (Python 3.11 to 3.13) and under a shifted timezone.
 - **Validated against a kernel**: 8 failure scenarios reproduced by a real
   Linux kernel (netem, iptables, real sockets — `lab/`), plus the auditd join
   against a real auditd journal. The resulting pcaps serve as fixtures.
+- **DNS validated against real servers**: 9 more scenarios answered by
+  dnsmasq 2.91 and BIND 9.20 in network namespaces (`lab/dns_scenario.sh`).
+  A `netem delay 1500ms` is measured at 1501 ms, including on a capture taken
+  at `-s 96` where the answers are unreadable. That confrontation found one
+  real defect — a TCP/53 retry merely *attempted* counted as a *successful*
+  one, which silenced the verdict in exactly the case it exists to catch —
+  and two defects in the test bench itself.
+- **UDP validated against a kernel**: 5 scenarios (`lab/udp_scenario.sh`)
+  where the ICMP errors are emitted by the Linux stack itself. One of them is
+  a NEGATIVE WITNESS: a one-way syslog flow, on which netverdict must stay
+  silent. It caught a real defect — the first version of the rule accused any
+  unknown port, and five syslog datagrams were enough to raise a panel and
+  flip the exit code.
 - **Validated on a real incident**: full Windows capture chain (pktmon ->
   analysis) against a slow service, a closed port and a filtered port — all
   three verdicts exact.
@@ -240,7 +253,25 @@ the tool you imagine; real execution describes the one that exists.
 
 ## Known limits (v1)
 
-- TCP/IPv4-IPv6 only (no UDP/QUIC, no fragment reassembly).
+- TCP, DNS and UDP (IPv4/IPv6). No QUIC, no fragment reassembly. The
+  packet-count line always adds up, so you can see what was left out.
+- **UDP verdicts rest on ICMP, never on silence.** A closed port or an
+  explicit REJECT is an act and yields a firm verdict; the absence of a reply
+  is nothing, because syslog, NetFlow, StatsD and SNMP traps emit blind by
+  design. Only ports known to answer (NTP, SNMP, RADIUS, TFTP, IKE…) allow
+  anything to be said about a silence, and even then the verdict is
+  AMBIGUOUS — a service can receive and deliberately ignore (unknown RADIUS
+  secret, wrong SNMP community), which is indistinguishable from a DROP seen
+  from the client.
+- **DoH and DoT are invisible.** Encrypted resolution rides TCP/443 or
+  TCP/853 and looks like any other connection. If a host resolves over DoH,
+  netverdict sees the TCP flow to the resolver and nothing about the names.
+- DNS answers are the first casualty of a tight snaplen: `tcpdump -s 96`
+  leaves 54 bytes of payload, enough for the header and the question, rarely
+  enough for the answer records. Latency, retries and response codes stay
+  accurate (they live in the first 12 bytes); the resolved addresses do not,
+  so flows cannot be named. The report says so instead of guessing — capture
+  with `capture.sh -s 256` if you want the names.
 - RTT p95 polluted by delayed ACKs (~40-200 ms): min and p50 are reliable.
   No rule therefore returns a NETWORK verdict on p95 alone. A high p95 is not
   ignored either: a healthy median with a significant tail produces an
@@ -289,7 +320,78 @@ the tool you imagine; real execution describes the one that exists.
   types are left `onmatch="include"` with no rule, which keeps them off —
   you don't turn on a full journal for one join.
 - English output (`--lang en`) — done, see above.
+- DNS resolutions (done): see below.
 - v2: capture driven from both sides (client AND server) and comparison.
+
+## DNS: the time TCP cannot show you
+
+A slow resolution happens **before the SYN**. It is therefore outside
+everything the TCP stage can measure — which is why, until v0.7, a capture
+where the user waited 2.4 seconds produced this:
+
+```
+13 packets read — 10 TCP, 0 ICMP, 0 non-IP, 0 unreadable
+[CLEAN] 1 conversation(s) with healthy transport          # exit code 0
+```
+
+The TCP verdict was right. The silence was not: three packets had vanished
+from the count, and any monitoring wired to that exit code read "nothing
+wrong". Now:
+
+```
+13 packets read — 10 TCP, 3 UDP, 0 ICMP, 0 other IP, 0 non-IP, 0 fragments, 0 unreadable
+
+DNS resolutions — what happened BEFORE the connections
+┌──────────  NETWORK — DNS api.corp.local (A) [high confidence] ──────────┐
+│ Slow DNS resolution: the delay happens before the connection            │
+│   * api.corp.local (A) resolved in 2400 ms by 10.0.0.53 after 2 queries │
+│   * addresses returned: 10.0.0.5                                        │
+│   * connection(s) that followed: 10.0.0.5:443                           │
+└─────────────────────────────────────────────────────────────────────────┘
+[CLEAN] 1 conversation(s) with healthy transport          # exit code 1
+```
+
+What it decides, from the same deterministic rule engine (`scope: dns`):
+
+| Observed | Verdict |
+|---|---|
+| Repeated queries, no answer | NETWORK (resolver unreachable or filtered) |
+| Answer only after retransmission | NETWORK (loss on the DNS path) |
+| Answer in more than a second | NETWORK (the delay is before the connection) |
+| SERVFAIL | APP (resolver fails: upstream, DNSSEC, broken zone) |
+| REFUSED | NETWORK (ACL on the resolver) |
+| NXDOMAIN | APP (typo, search suffix, missing record) |
+| TC=1 with no TCP/53 retry | NETWORK (firewall allows UDP/53, forgot TCP/53) |
+| One query, no answer, capture ends | AMBIGUOUS (undecidable, and it says so) |
+
+DNS carried over **TCP/53** is decoded too (2-byte length prefix, segments
+reassembled): a truncated answer followed by a successful TCP retry is no
+longer mistaken for a failure. mDNS (5353) is decoded and counted, but the
+accusing rules stand down there — a multicast question with no answer is how
+the protocol works.
+
+## UDP: what a datagram lets you say
+
+| Observed | Verdict |
+|---|---|
+| ICMP port-unreachable | APP (nothing is listening — the UDP twin of RST-to-SYN) |
+| ICMP administratively-prohibited | NETWORK (a device names itself and filters) |
+| ICMP fragmentation-needed | NETWORK (datagram too large for the path) |
+| A known request/reply service stays silent | AMBIGUOUS (DROP, or the service ignoring you) |
+| Two-way exchange, no ICMP | CLEAN |
+| Anything else with no reply | *nothing* — see the limits above |
+
+Before v0.8 a stopped UDP service (RADIUS, SNMP, a syslog collector) produced
+no verdict at all and exit code 0, even though the ICMP was sitting decoded in
+the capture: it was attached to nothing.
+
+Flows are also named: a TCP conversation preceded by the resolution that
+produced its address carries that name, and — only when the resolution
+immediately precedes it — the time it cost.
+
+Rules live in `netverdict/rules/dns.yaml`. Your own `--rules` file can hold
+both kinds: a rule is routed by its `scope` field (`flow` by default), so a
+DNS rule never gets evaluated against a TCP flow by accident.
 
 ## License
 

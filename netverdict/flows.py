@@ -10,6 +10,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional
 
+import dpkt
+
 from .pcap import Capture, IcmpEvent, TcpPkt
 
 # En dessous de ce delta, deux segments identiques (meme seq/len/ip_id) sont
@@ -153,6 +155,13 @@ def build_flows(cap: Capture) -> list[Flow]:
                     ((fl.server, fl.sport), (fl.client, fl.cport))):
             by_endpoints.setdefault(cle, []).append(fl)
     for ev in cap.icmp_events:
+        # Le PROTOCOLE du paquet fautif fait partie de l'identite : depuis que
+        # les conversations UDP existent, un « port unreachable » concernant un
+        # datagramme UDP ne doit pas etre colle a une conversation TCP qui
+        # porterait par hasard les memes ports. 0 = protocole illisible : on
+        # garde l'ancien comportement plutot que de priver le TCP d'une preuve.
+        if ev.orig_proto not in (0, dpkt.ip.IP_PROTO_TCP):
+            continue
         candidats = by_endpoints.get(
             ((ev.orig_src, ev.orig_sport), (ev.orig_dst, ev.orig_dport)))
         if candidats:

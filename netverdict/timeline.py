@@ -21,7 +21,26 @@ from typing import Iterable, Optional
 # contenir des sequences ANSI qui reecrivent le rapport a l'ecran (effacer
 # les verdicts au-dessus, falsifier des lignes). Neutralise A L'EMISSION,
 # dans le contrat : toute source presente et future est couverte.
-_CTRL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+#
+# Les controles BIDI Unicode sont couverts pour la meme raison, et elle est
+# plus vicieuse : U+202E (RIGHT-TO-LEFT OVERRIDE) n'efface rien, il INVERSE
+# l'affichage du texte qui suit. Un nom de service ou un chemin de binaire
+# choisi par un tiers peut donc se lire a l'envers dans le rapport -
+# "gpj.exe" pour "exe.jpg" est le cas d'ecole. Le lecteur n'a aucun moyen de
+# s'en apercevoir : le caractere est invisible. Trouve a la revue du 26/07,
+# ferme ici, et applique des l'origine aux noms DNS - qui viennent, eux, de
+# paquets bruts que n'importe qui sur le chemin peut fabriquer.
+#
+# Ecrits en echappements et non en litteral : un controle bidi COLLE dans le
+# code source serait invisible dans l'editeur, donc irrelisable - le defaut
+# se cacherait dans son propre correctif.
+_CTRL_RE = re.compile(
+    "[\x00-\x1f\x7f-\x9f"
+    "‎‏"          # LEFT-TO-RIGHT / RIGHT-TO-LEFT MARK
+    "‪-‮"         # EMBEDDING / POP / OVERRIDE
+    "⁦-⁩"         # ISOLATE : LRI, RLI, FSI, PDI
+    "]"
+)
 _MAX_TEXT = 300
 
 

@@ -42,8 +42,18 @@
       wevtutil sl Microsoft-Windows-Sysmon/Operational /ms:67108864
 -->
 <Sysmon schemaversion="4.91">
-  <!-- Aucun hachage calcule : on ne veut que la jointure reseau, et le hachage
-       coute du CPU a chaque process demarre pour rien ici. -->
+  <!-- ATTENTION AU SENS DE `*` : il vaut TOUS les algorithmes, pas aucun.
+       Le commentaire precedent affirmait l'inverse ("aucun hachage calcule"),
+       ce qui etait faux mot pour mot (revue du 26/07/2026).
+
+       Sans consequence ici, et c'est la seule raison de le laisser tel quel :
+       Sysmon ne hache que pour les evenements qui portent un champ Hashes
+       (ProcessCreate, FileCreate, ImageLoad...). Cette configuration n'active
+       QUE l'Event 3 (NetworkConnect), qui n'en porte aucun - donc rien n'est
+       hache en pratique. La valeur reste `*` parce qu'elle est valide au
+       schema et n'a pas pu etre confrontee a un vrai Sysmon dans cette
+       session : changer une configuration DEJA APPLIQUEE sur une machine sans
+       pouvoir la tester serait un pari, pas un correctif. -->
   <HashAlgorithms>*</HashAlgorithms>
   <CheckRevocation>false</CheckRevocation>
 

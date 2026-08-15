@@ -1,0 +1,409 @@
+# Regles de verdict sur les RESOLUTIONS DNS.
+#
+# Fichier separe de builtin.yaml parce que le contrat de signaux l'est aussi :
+# ces regles s'evaluent contre DnsSignals, pas contre FlowSignals. Les melanger
+# ferait exploser le chargement (le dry-run sonde un seul contrat) et, pire,
+# laisserait une regle DNS matcher un flux TCP par accident.
+#
+# Toutes portent `scope: dns`. Un utilisateur peut en ecrire dans son propre
+# fichier `--rules` : c'est ce champ qui les route vers le bon contrat.
+#
+# Ce que l'etage DNS voit et que l'etage TCP ne peut pas voir : la resolution
+# se produit AVANT le SYN. Un verdict « transport sain » reste vrai pendant
+# que l'utilisateur attend deux secondes.
+
+rules:
+
+  # ------------------------------------------------------- pas de reponse
+  - id: dns-no-answer
+    scope: dns
+    verdict: RESEAU
+    priority: 90
+    confidence: haute
+    title: "Le serveur DNS ne repond pas"
+    when:
+      all:
+        - "answered == false"
+        # mDNS exclu : une question multicast sans reponse veut dire « aucune
+        # machine de ce segment ne porte ce nom », pas « le serveur est mort ».
+        - "is_mdns == false"
+        # Au moins une REEMISSION. Une question unique restee sans reponse
+        # n'accuse personne : la capture a pu s'arreter une milliseconde
+        # apres. La reemission, elle, est un acte du client - il a attendu
+        # son timeout, puis insiste. C'est la preuve que le silence a dure.
+        - "attempts >= 2"
+    evidence:
+      - "{attempts} questions pour {qname} ({qtype}) vers {resolver}, aucune reponse en {observed_ms:.0f} ms"
+      - "resolveurs interroges : {resolvers_tried}"
+    remediation: |
+      Le client a demande {qname} a {resolver} et n'a jamais eu de reponse.
+      Tant que ce nom ne se resout pas, aucune connexion vers ce service ne
+      peut commencer - inutile de chercher du cote de l'application.
+      Dans l'ordre :
+      1. Joignabilite du resolveur : `dig @{resolver} {qname}` depuis CE
+         client (pas depuis un autre poste, le filtrage peut differer).
+      2. Filtrage UDP/53 sur le chemin. Un pare-feu qui a perdu sa regle,
+         ou un client deplace dans un autre VLAN, produisent exactement ce
+         silence - un DROP, pas un REJECT (sinon un ICMP serait visible).
+      3. Etat du service resolveur lui-meme (charge, zone rechargee, arret).
+      4. Le resolveur configure est-il le bon ? Verifier /etc/resolv.conf ou
+         les DNS de l'interface Windows.
+    title_en: "The DNS server is not answering"
+    evidence_en:
+      - "{attempts} queries for {qname} ({qtype}) to {resolver}, no answer within {observed_ms:.0f} ms"
+      - "resolvers tried: {resolvers_tried}"
+    remediation_en: |
+      The client asked {resolver} for {qname} and never got an answer. Until
+      that name resolves, no connection to this service can even start - no
+      point looking at the application.
+      In order:
+      1. Reachability: `dig @{resolver} {qname}` from THIS client (not from
+         another host - filtering may differ).
+      2. UDP/53 filtering along the path. A firewall that lost its rule, or a
+         client moved to another VLAN, produce exactly this silence - a DROP,
+         not a REJECT (a REJECT would show up as ICMP).
+      3. The resolver service itself (load, zone reload, shutdown).
+      4. Is the configured resolver the right one? Check /etc/resolv.conf or
+         the Windows interface DNS settings.
+
+  - id: dns-unanswered-capture-too-short
+    scope: dns
+    verdict: AMBIGU
+    priority: 20
+    confidence: basse
+    title: "Question DNS sans reponse, mais la capture s'arrete trop tot"
+    when:
+      all:
+        - "answered == false"
+        - "attempts == 1"
+        - "capture_ends_first == true"
+        - "is_mdns == false"
+    evidence:
+      - "1 question pour {qname} ({qtype}) vers {resolver}, capture terminee {observed_ms:.0f} ms plus tard"
+    remediation: |
+      Une seule question, aucune reponse, et la capture s'arrete : c'est
+      indecidable. Le client n'a meme pas eu le temps de reemettre (les
+      resolveurs attendent 1 a 5 s avant de le faire), donc rien ne distingue
+      « le serveur ne repond pas » de « la capture etait trop courte ».
+      Refaire une capture d'au moins 15 s couvrant le debut de l'incident.
+    title_en: "Unanswered DNS query, but the capture ends too early"
+    evidence_en:
+      - "1 query for {qname} ({qtype}) to {resolver}, capture ended {observed_ms:.0f} ms later"
+    remediation_en: |
+      A single query, no answer, and the capture ends: this is undecidable.
+      The client did not even have time to retransmit (resolvers wait 1 to 5 s
+      before doing so), so nothing separates "the server is not answering"
+      from "the capture was too short". Take a capture of at least 15 s
+      covering the start of the incident.
+
+  # ------------------------------------------------------- reponses d'erreur
+  - id: dns-servfail
+    scope: dns
+    verdict: APP
+    priority: 85
+    confidence: haute
+    title: "Le serveur DNS a repondu SERVFAIL"
+    when:
+      - "rcode == 2"
+    evidence:
+      - "{resolver} repond SERVFAIL pour {qname} ({qtype}) en {latency_ms:.0f} ms"
+    remediation: |
+      Le reseau fonctionne : la question est partie, la reponse est revenue.
+      C'est le service DNS qui echoue a repondre. SERVFAIL ne dit pas
+      pourquoi ; les trois causes courantes, dans l'ordre de frequence :
+      1. Le resolveur n'a pas pu joindre les serveurs autoritaires de la zone
+         (panne en amont, filtrage sortant du resolveur lui-meme).
+      2. Validation DNSSEC en echec - signature expiree ou chaine cassee.
+         C'est le cas le plus vicieux : le nom se resout partout ailleurs, et
+         echoue seulement sur les resolveurs qui valident.
+      3. Zone en erreur de chargement sur le serveur autoritaire.
+      Interroger le resolveur avec `dig +cd {qname}` : si la reponse arrive
+      avec `+cd` (validation desactivee), c'est DNSSEC.
+    title_en: "The DNS server answered SERVFAIL"
+    evidence_en:
+      - "{resolver} answers SERVFAIL for {qname} ({qtype}) in {latency_ms:.0f} ms"
+    remediation_en: |
+      The network is fine: the query went out, the answer came back. It is the
+      DNS service that fails to answer. SERVFAIL does not say why; the three
+      common causes, most frequent first:
+      1. The resolver could not reach the zone's authoritative servers
+         (upstream outage, or egress filtering on the resolver itself).
+      2. DNSSEC validation failure - expired signature or broken chain. This
+         is the nastiest one: the name resolves everywhere else and fails only
+         on validating resolvers.
+      3. Zone failing to load on the authoritative server.
+      Query the resolver with `dig +cd {qname}`: if the answer comes back with
+      `+cd` (validation disabled), it is DNSSEC.
+
+  - id: dns-refused
+    scope: dns
+    verdict: RESEAU
+    priority: 85
+    confidence: haute
+    title: "Le serveur DNS REFUSE de repondre a ce client"
+    when:
+      - "rcode == 5"
+    evidence:
+      - "{resolver} repond REFUSED a {client} pour {qname} ({qtype})"
+    remediation: |
+      REFUSED n'est pas une panne : c'est une decision. Le serveur a recu la
+      question et refuse de la traiter pour CE client. Presque toujours une
+      liste de controle d'acces (allow-query / allow-recursion sur BIND,
+      « serveurs autorises » sur un DNS Windows), donc :
+      - ce client est-il dans le bon sous-reseau au regard de cette ACL ?
+      - a-t-il change d'adresse recemment (bail DHCP, nouveau VLAN, VPN) ?
+      - demande-t-il de la recursion a un serveur purement autoritaire ?
+      Le correctif est sur le RESOLVEUR, pas sur le client.
+    title_en: "The DNS server REFUSES to answer this client"
+    evidence_en:
+      - "{resolver} answers REFUSED to {client} for {qname} ({qtype})"
+    remediation_en: |
+      REFUSED is not a failure: it is a decision. The server received the
+      query and refuses to serve THIS client. Almost always an access control
+      list (allow-query / allow-recursion on BIND, "authorized servers" on a
+      Windows DNS), so:
+      - is this client in the right subnet for that ACL?
+      - did its address change recently (DHCP lease, new VLAN, VPN)?
+      - is it asking for recursion from a purely authoritative server?
+      The fix is on the RESOLVER, not on the client.
+
+  - id: dns-nxdomain
+    scope: dns
+    verdict: APP
+    priority: 80
+    confidence: haute
+    title: "Le nom demande n'existe pas (NXDOMAIN)"
+    when:
+      - "rcode == 3"
+    evidence:
+      - "{resolver} repond NXDOMAIN pour {qname} ({qtype}) en {latency_ms:.0f} ms"
+    remediation: |
+      Le DNS fonctionne et repond la verite : ce nom n'existe pas. La
+      connexion qui devait suivre n'a donc jamais pu commencer. Chercher du
+      cote de ce qui a DEMANDE ce nom :
+      - faute de frappe ou nom en dur dans une configuration applicative ;
+      - suffixe de recherche : un nom court complete avec le mauvais domaine
+        (search dans resolv.conf, suffixes DNS Windows) - c'est la cause la
+        plus frequente quand « ca marchait avant » ;
+      - enregistrement supprime ou zone non repliquee vers ce resolveur.
+      NXDOMAIN est une reponse VALIDE : ne pas chercher de panne reseau.
+    title_en: "The requested name does not exist (NXDOMAIN)"
+    evidence_en:
+      - "{resolver} answers NXDOMAIN for {qname} ({qtype}) in {latency_ms:.0f} ms"
+    remediation_en: |
+      DNS works and is telling the truth: this name does not exist. The
+      connection that was meant to follow never started. Look at whatever
+      ASKED for this name:
+      - typo, or a hardcoded name in an application configuration;
+      - search suffix: a short name completed with the wrong domain (`search`
+        in resolv.conf, Windows DNS suffixes) - the most frequent cause when
+        "it used to work";
+      - record deleted, or zone not replicated to this resolver.
+      NXDOMAIN is a VALID answer: do not go hunting for a network fault.
+
+  # ------------------------------------------------------- reponse tronquee
+  # Cas le plus net, et celui du lab : le client A rejoue sa question en TCP et
+  # la connexion n'est jamais montee. Le pare-feu est PROUVE, pas suppose - la
+  # confiance est donc plus haute que quand aucun repli n'apparait.
+  - id: dns-truncated-tcp-retry-failed
+    scope: dns
+    verdict: RESEAU
+    priority: 89
+    confidence: haute
+    title: "Reponse DNS tronquee, repli TCP/53 tente et reste sans reponse"
+    when:
+      all:
+        - "dns_truncated == true"
+        - "tcp_retry_seen == true"
+        - "tcp_retry_ok == false"
+    evidence:
+      - "{resolver} repond TC=1 pour {qname} ({qtype}) : reponse trop grande pour UDP"
+      - "le client a rejoue la question en TCP/53 et la connexion n'a jamais abouti"
+    remediation: |
+      Le protocole a ete suivi des deux cotes : le serveur a dit « ma reponse
+      ne tient pas dans un datagramme » (bit TC), le client a rejoue la
+      question en TCP/53. C'est la CONNEXION TCP qui n'aboutit pas - donc
+      quelque chose entre les deux la jette.
+      Le coupable est presque toujours un pare-feu qui autorise UDP/53 et
+      OUBLIE TCP/53. La panne reste invisible tant que les reponses sont
+      petites, puis apparait le jour ou une zone grossit (DNSSEC, plusieurs
+      enregistrements, IPv6) - d'ou un « ca marchait la semaine derniere »
+      parfaitement sincere.
+      Verifier la regle TCP/53 sur le chemin, puis `dig +tcp @{resolver} {qname}`
+      depuis ce client pour confirmer le retablissement.
+    title_en: "Truncated DNS answer, TCP/53 retry attempted and left unanswered"
+    evidence_en:
+      - "{resolver} answers TC=1 for {qname} ({qtype}): answer too large for UDP"
+      - "the client replayed the query over TCP/53 and the connection never completed"
+    remediation_en: |
+      Both sides followed the protocol: the server said "my answer does not
+      fit in a datagram" (TC bit), the client replayed the query over TCP/53.
+      It is the TCP CONNECTION that fails - so something in between is
+      dropping it.
+      The culprit is almost always a firewall that allows UDP/53 and FORGETS
+      TCP/53. The fault stays invisible while answers are small, then shows up
+      the day a zone grows (DNSSEC, several records, IPv6) - hence a perfectly
+      sincere "it worked last week".
+      Check the TCP/53 rule along the path, then run `dig +tcp @{resolver}
+      {qname}` from this client to confirm the fix.
+
+  - id: dns-truncated-no-tcp-retry
+    scope: dns
+    verdict: RESEAU
+    priority: 88
+    confidence: moyenne
+    title: "Reponse DNS tronquee et aucun repli TCP/53 observe"
+    when:
+      all:
+        - "dns_truncated == true"
+        - "tcp_retry_seen == false"
+    evidence:
+      - "{resolver} repond TC=1 pour {qname} ({qtype}) : reponse trop grande pour UDP"
+      - "aucune reprise en TCP/53 dans la capture"
+    remediation: |
+      Le serveur a repondu « ma reponse ne tient pas dans un datagramme UDP »
+      (bit TC). Le client DOIT alors rejouer la question en TCP/53 - c'est le
+      protocole, pas une option. Aucune reprise TCP n'apparait ici, donc la
+      resolution s'arrete la.
+      Cause quasi systematique : un pare-feu qui autorise UDP/53 et OUBLIE
+      TCP/53. La panne est invisible tant que les reponses restent petites,
+      puis apparait le jour ou une zone grossit (DNSSEC, plusieurs
+      enregistrements, IPv6) - d'ou un « ca marchait la semaine derniere »
+      parfaitement sincere.
+      Verifier : `dig +tcp @{resolver} {qname}` depuis ce client, et la regle
+      TCP/53 sur le pare-feu.
+    title_en: "Truncated DNS answer and no TCP/53 retry observed"
+    evidence_en:
+      - "{resolver} answers TC=1 for {qname} ({qtype}): answer too large for UDP"
+      - "no TCP/53 retry anywhere in the capture"
+    remediation_en: |
+      The server answered "my answer does not fit in a UDP datagram" (TC bit).
+      The client MUST then replay the query over TCP/53 - that is the
+      protocol, not an option. No TCP retry appears here, so resolution stops.
+      Near-systematic cause: a firewall that allows UDP/53 and FORGETS
+      TCP/53. The fault stays invisible while answers are small, then shows up
+      the day a zone grows (DNSSEC, several records, IPv6) - hence a perfectly
+      sincere "it worked last week".
+      Check: `dig +tcp @{resolver} {qname}` from this client, and the TCP/53
+      rule on the firewall.
+
+  # ------------------------------------------------------- lenteur
+  - id: dns-slow
+    scope: dns
+    verdict: RESEAU
+    priority: 70
+    confidence: haute
+    title: "Resolution DNS lente : le delai est avant la connexion"
+    when:
+      all:
+        - "answered == true"
+        # mDNS exclu : sur un segment charge, une reponse multicast tardive
+        # ne dit rien d'un service, et personne n'attend derriere.
+        - "is_mdns == false"
+        # Une seconde pleine d'attente. Un resolveur interne repond sous
+        # 10 ms sur cache et sous ~100 ms en recursion ; une recursion
+        # complete vers l'exterieur peut legitimement atteindre 300 a 800 ms
+        # sur un cache froid. Le seuil est donc pose au-dessus de ce qui
+        # s'explique - a 1 s, l'attente n'est plus normale, et elle est deja
+        # perceptible par un humain.
+        - "latency_ms >= 1000"
+    evidence:
+      - "{qname} ({qtype}) resolu en {latency_ms:.0f} ms par {resolver} apres {attempts} question(s)"
+      - "adresses obtenues : {answers_str}"
+    remediation: |
+      Ce delai est ANTERIEUR a la connexion TCP : il n'apparait dans aucune
+      mesure de flux, et un verdict « transport sain » sur la connexion qui
+      suit reste vrai pendant que l'utilisateur attend.
+      Ou chercher, selon la forme :
+      - {attempts} question(s) : plusieurs questions signent une perte sur le
+        chemin DNS ; le delai est alors le TIMEOUT du client, pas le temps de
+        reflexion du serveur.
+      - une seule question et une reponse tardive : c'est le resolveur qui
+        met ce temps a repondre (recursion vers l'exterieur, cache froid,
+        forwarder injoignable qui expire avant repli).
+      Mesurer directement : `dig @{resolver} {qname}` deux fois de suite - si
+      le second appel est instantane, c'est du cache froid, pas une panne.
+    title_en: "Slow DNS resolution: the delay happens before the connection"
+    evidence_en:
+      - "{qname} ({qtype}) resolved in {latency_ms:.0f} ms by {resolver} after {attempts} query(ies)"
+      - "addresses returned: {answers_str}"
+    remediation_en: |
+      This delay happens BEFORE the TCP connection: it shows up in no flow
+      measurement, and a "healthy transport" verdict on the connection that
+      follows stays true while the user waits.
+      Where to look, depending on the shape:
+      - {attempts} query(ies): several queries mean loss on the DNS path; the
+        delay is then the client's TIMEOUT, not the server's thinking time.
+      - a single query and a late answer: the resolver itself takes that long
+        (outbound recursion, cold cache, unreachable forwarder timing out
+        before fallback).
+      Measure it directly: run `dig @{resolver} {qname}` twice - if the second
+      call is instant, it was a cold cache, not a fault.
+
+  - id: dns-answered-after-retry
+    scope: dns
+    verdict: RESEAU
+    priority: 60
+    confidence: moyenne
+    title: "Resolution aboutie, mais seulement apres reemission"
+    when:
+      all:
+        - "answered == true"
+        - "attempts >= 2"
+        - "is_mdns == false"
+    unless:
+      # dns-slow dit deja tout quand l'attente depasse la seconde ; deux
+      # verdicts pour un seul fait diluerait le rapport.
+      - "latency_ms >= 1000"
+    evidence:
+      - "{attempts} questions pour {qname} ({qtype}), reponse de {resolver} en {latency_ms:.0f} ms"
+    remediation: |
+      La resolution a fini par aboutir, mais le client a du reposer sa
+      question : au moins une question ou une reponse s'est perdue sur le
+      chemin. Le DNS tient en UDP, sans retransmission de transport - chaque
+      perte coute un timeout client entier.
+      Ce n'est pas un incident en soi, c'en est le debut : la meme perte, sur
+      une resolution au timeout plus long, fabrique les « lenteurs
+      inexplicables » que personne ne reproduit. Chercher la perte sur le
+      chemin client -> {resolver} (saturation d'un lien, equipement qui
+      limite le debit UDP, resolveur qui jette sous charge).
+    title_en: "Resolution succeeded, but only after retransmission"
+    evidence_en:
+      - "{attempts} queries for {qname} ({qtype}), answer from {resolver} in {latency_ms:.0f} ms"
+    remediation_en: |
+      Resolution eventually succeeded, but the client had to ask again: at
+      least one query or answer was lost on the way. DNS runs over UDP with no
+      transport retransmission - every loss costs a full client timeout.
+      This is not an incident by itself, it is the beginning of one: the same
+      loss, on a resolution with a longer timeout, produces the "unexplained
+      slowness" nobody can reproduce. Look for loss on the path from the
+      client to {resolver} (saturated link, device rate-limiting UDP, resolver
+      dropping under load).
+
+  # ------------------------------------------------------- rien a signaler
+  - id: dns-clean
+    scope: dns
+    verdict: RAS
+    priority: 10
+    confidence: haute
+    title: "Resolution DNS saine"
+    when:
+      all:
+        - "answered == true"
+        - "rcode == 0"
+        - "attempts == 1"
+        - "latency_ms < 1000"
+        - "dns_truncated == false"
+    evidence:
+      - "{qname} ({qtype}) resolu en {latency_ms:.0f} ms par {resolver}"
+    remediation: |
+      Rien a faire : la resolution a abouti du premier coup et sans delai
+      notable. Si un service reste inaccessible, la cause n'est pas dans la
+      resolution de ce nom.
+    title_en: "Healthy DNS resolution"
+    evidence_en:
+      - "{qname} ({qtype}) resolved in {latency_ms:.0f} ms by {resolver}"
+    remediation_en: |
+      Nothing to do: resolution succeeded on the first try with no notable
+      delay. If a service is still unreachable, the cause is not in resolving
+      this name.

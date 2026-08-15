@@ -16,8 +16,12 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     from .pcap import read_capture
     from .flows import build_flows
     from .signals import compute_signals
-    from .rules.engine import load_rules, evaluate, RuleError
+    from .rules.engine import (load_rules, load_dns_rules, load_udp_rules,
+                               evaluate, evaluate_dns, evaluate_udp, RuleError)
     from .report import render_console, to_json
+    from .dns import (build_resolutions, compute_dns_signals, link_flows,
+                      parse_dns_over_tcp, reassemble_stream)
+    from .udp import build_udp_conversations, compute_udp_signals
     from .hostsnap import HostSnapshot
 
     # Resolue AVANT tout : le premier message d'erreur possible doit deja
@@ -26,6 +30,8 @@ def cmd_analyze(args: argparse.Namespace) -> int:
 
     try:
         rules = load_rules(args.rules)
+        dns_rules = load_dns_rules(args.rules)
+        udp_rules = load_udp_rules(args.rules)
     except RuleError as e:
         print(t("err.rules", lang, e=e), file=sys.stderr)
         return 2
@@ -42,6 +48,56 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     flows = build_flows(cap)
     signals = [compute_signals(fl) for fl in flows]
     verdicts = evaluate(signals, rules, lang)
+
+    # Etage DNS. Les flux TCP vers le port 53 sont passes au constructeur de
+    # resolutions : ils repondent a la question « le client a-t-il rejoue sa
+    # question en TCP apres une reponse tronquee ? », qui n'a pas de reponse
+    # dans les datagrammes UDP seuls.
+    # `established_seen` et non la simple existence du flux : au lab, un repli
+    # TCP/53 reduit a deux SYN jetes par un pare-feu passait pour un repli
+    # reussi, et le verdict disparaissait dans le cas meme qu'il vise.
+    tcp53 = [(s.t_first, s.client, s.server, s.established_seen)
+             for s in signals if s.sport == 53]
+    # Messages DNS transportes par TCP/53 : ils s'ajoutent aux datagrammes,
+    # dans la meme liste. Une reponse tronquee puis rejouee en TCP forme ainsi
+    # UNE resolution, et son aboutissement est visible au lieu d'etre suppose.
+    msgs = list(cap.dns_msgs)
+    for fl in flows:
+        if fl.sport != 53:
+            continue
+        for du_client in (True, False):
+            segs = [(op.pkt.seq, op.pkt.payload) for op in fl.pkts
+                    if op.from_client is du_client and op.pkt.payload]
+            if not segs:
+                continue
+            flux, complet = reassemble_stream(segs)
+            t0 = next(op.pkt.ts for op in fl.pkts
+                      if op.from_client is du_client and op.pkt.payload)
+            src, dst = ((fl.client, fl.server) if du_client
+                        else (fl.server, fl.client))
+            sp, dp = ((fl.cport, fl.sport) if du_client
+                      else (fl.sport, fl.cport))
+            msgs.extend(parse_dns_over_tcp(t0, src, dst, sp, dp, flux, complet))
+    resolutions = build_resolutions(msgs, cap.t_last_seen, tcp53)
+    dns_verdicts = evaluate_dns(
+        [compute_dns_signals(r, cap.t_last_seen) for r in resolutions],
+        dns_rules, lang)
+    dns_links = link_flows(resolutions,
+                           [(i, s.server, s.t_first) for i, s in enumerate(signals)])
+
+    # Etage UDP. Il couvre TOUT l'UDP, DNS compris, mais se tait sur les
+    # conversations dont l'etage DNS a su tirer une resolution : ses verdicts
+    # y sont plus precis. L'inverse aurait laisse un trou - un DNS dont le nom
+    # est illisible (snaplen) ne produit aucune resolution, et personne
+    # n'aurait alors rien dit du silence de son resolveur.
+    conversations = build_udp_conversations(cap)
+    couvert_par_dns = {(r.client, r.resolvers[0] if r.resolvers else "")
+                       for r in resolutions if r.attempts}
+    udp_verdicts = evaluate_udp(
+        [compute_udp_signals(
+            c, dns_handled=(c.client, c.server) in couvert_par_dns)
+         for c in conversations],
+        udp_rules, lang)
 
     snapshot = None
     if args.snapshot:
@@ -125,15 +181,26 @@ def cmd_analyze(args: argparse.Namespace) -> int:
         timeline = timeline.window(cap.t_first, cap.t_last)
 
     if args.json:
-        print(to_json(cap, verdicts, snapshot, timeline, lang))
+        print(to_json(cap, verdicts, snapshot, timeline, lang,
+                      dns_verdicts=dns_verdicts, dns_links=dns_links,
+                      udp_verdicts=udp_verdicts))
     else:
         render_console(cap, verdicts, snapshot, top=args.top,
-                       timeline=timeline, lang=lang)
+                       timeline=timeline, lang=lang,
+                       dns_verdicts=dns_verdicts, dns_links=dns_links,
+                       udp_verdicts=udp_verdicts)
 
     if args.explain:
         from .explain import explain, ExplainUnavailable
         try:
-            print(explain(to_json(cap, verdicts, snapshot, timeline, lang),
+            # Le MEME rapport que celui rendu a l'utilisateur, etages DNS et
+            # UDP compris : sans eux, la synthese narrative expliquerait une
+            # capture dont elle ignore la resolution de nom qui a coute deux
+            # secondes - et elle le ferait avec aplomb.
+            print(explain(to_json(cap, verdicts, snapshot, timeline, lang,
+                                  dns_verdicts=dns_verdicts,
+                                  dns_links=dns_links,
+                                  udp_verdicts=udp_verdicts),
                           lang))
             print()
         except ExplainUnavailable as e:
@@ -141,7 +208,16 @@ def cmd_analyze(args: argparse.Namespace) -> int:
 
     # Code retour utilisable en script : 0 = rien d'anormal, 1 = au moins un
     # verdict non-RAS (meme convention que grep : "trouve" vs "rien trouve").
-    problematic = any(fv.primary and fv.verdict != "RAS" for fv in verdicts)
+    # Les verdicts DNS comptent AUTANT que ceux des flux : une resolution de
+    # 2,4 s devant des connexions saines rendait 0, et toute supervision
+    # branchee sur ce code lisait « rien d'anormal » pendant que l'utilisateur
+    # attendait. Le silence en console avait ete corrige ; celui-ci, plus
+    # discret encore, ne se voit que d'un script.
+    problematic = (any(fv.primary and fv.verdict != "RAS" for fv in verdicts)
+                   or any(dv.primary and dv.verdict != "RAS"
+                          for dv in dns_verdicts)
+                   or any(uv.primary and uv.verdict != "RAS"
+                          for uv in udp_verdicts))
     return 1 if problematic else 0
 
 

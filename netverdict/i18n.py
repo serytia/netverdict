@@ -92,10 +92,82 @@ STRINGS: dict[str, dict[str, str]] = {
 
     # ------------------------------------------------------------- report.py
     "report.header": {
-        "fr": "{total} paquets lus — {tcp} TCP, {icmp} ICMP, {non_ip} non-IP, "
+        "fr": "{total} paquets lus — {tcp} TCP, {udp} UDP, {icmp} ICMP, "
+              "{other} autres IP, {non_ip} non-IP, {frags} fragments, "
               "{errors} illisibles — {flows} conversations",
-        "en": "{total} packets read — {tcp} TCP, {icmp} ICMP, {non_ip} non-IP, "
+        "en": "{total} packets read — {tcp} TCP, {udp} UDP, {icmp} ICMP, "
+              "{other} other IP, {non_ip} non-IP, {frags} fragments, "
               "{errors} unreadable — {flows} conversations",
+    },
+    "report.udp_header": {
+        "fr": "Conversations UDP",
+        "en": "UDP conversations",
+    },
+    "report.udp_healthy": {
+        "fr": "{n} conversation(s) UDP sans erreur",
+        "en": "{n} UDP conversation(s) with no error",
+    },
+    "report.udp_direction_unsure": {
+        "fr": "sens client/serveur devine (UDP n'a pas de handshake)",
+        "en": "client/server direction guessed (UDP has no handshake)",
+    },
+    "report.udp_unidirectional_hint": {
+        "fr": "port {sport} = {service}, un service qui repond normalement",
+        "en": "port {sport} = {service}, a service that normally answers",
+    },
+    "report.dns_header": {
+        "fr": "Resolutions DNS — ce qui s'est passe AVANT les connexions",
+        "en": "DNS resolutions — what happened BEFORE the connections",
+    },
+    "report.dns_leads_to": {
+        "fr": "connexion(s) qui ont suivi : ",
+        "en": "connection(s) that followed: ",
+    },
+    "report.dns_healthy": {
+        "fr": "{n} resolution(s) DNS saine(s)",
+        "en": "{n} healthy DNS resolution(s)",
+    },
+    "report.dns_name_hint": {
+        "fr": "nom resolu : {qname}",
+        "en": "resolved name: {qname}",
+    },
+    "report.dns_before_flow": {
+        "fr": "precede de {ms:.0f} ms de resolution DNS pour {qname} — "
+              "ce delai s'ajoute a ce que l'utilisateur a subi",
+        "en": "preceded by {ms:.0f} ms of DNS resolution for {qname} — "
+              "that delay adds to what the user experienced",
+    },
+    "report.dns_answers_unreadable": {
+        "fr": "attention : {n} reponse(s) DNS coupee(s) par le snaplen — "
+              "latence et codes de retour restent justes, mais les adresses "
+              "sont illisibles, donc aucun flux ne peut etre nomme "
+              "(capturer avec un snaplen plus grand pour les obtenir)",
+        "en": "warning: {n} DNS answer(s) cut by the snaplen — latency and "
+              "response codes remain accurate, but the addresses are "
+              "unreadable, so no flow can be named (capture with a larger "
+              "snaplen to get them)",
+    },
+    "report.warn_dns_no_resolution": {
+        "fr": "attention : {n} paquets DNS lus, mais aucune resolution n'a pu "
+              "etre reconstituee (questions illisibles, ou reponses dont la "
+              "question precede la capture)",
+        "en": "warning: {n} DNS packets read, but no resolution could be "
+              "reconstructed (unreadable queries, or answers whose query "
+              "predates the capture)",
+    },
+    "report.warn_dns_unreadable": {
+        "fr": "attention : {n} datagramme(s) UDP/53 trop courts pour porter "
+              "meme un en-tete DNS, ignores",
+        "en": "warning: {n} UDP/53 datagram(s) too short to carry even a DNS "
+              "header, skipped",
+    },
+    "report.warn_dns_not_analyzed": {
+        "fr": "attention : {dns} paquets DNS (UDP/53) ne sont PAS analyses — "
+              "une resolution lente ou en echec se produit avant le SYN et "
+              "n'apparait dans aucun verdict ci-dessous",
+        "en": "warning: {dns} DNS packets (UDP/53) are NOT analyzed — a slow "
+              "or failed resolution happens before the SYN and appears in "
+              "none of the verdicts below",
     },
     "report.warn_parse_errors": {
         "fr": "attention : {errors}/{total} paquets illisibles, les verdicts "
@@ -257,6 +329,12 @@ STRINGS: dict[str, dict[str, str]] = {
     "correlate.attr_user": {
         "fr": ", utilisateur {user}",
         "en": ", user {user}",
+    },
+    "correlate.attr_clock_tolerance": {
+        "fr": " [hors de la duree du flux : rattache par la tolerance "
+              "d'horloge, verifier la synchro des deux machines]",
+        "en": " [outside the flow's lifetime: matched through the clock "
+              "tolerance, check both machines' time sync]",
     },
     "correlate.attr_inexact": {
         "fr": " — rapproche par la DESTINATION seule (le journal ne donne pas "
