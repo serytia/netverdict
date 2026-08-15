@@ -27,11 +27,18 @@ rules:
         # mDNS exclu : une question multicast sans reponse veut dire « aucune
         # machine de ce segment ne porte ce nom », pas « le serveur est mort ».
         - "is_mdns == false"
-        # Au moins une REEMISSION. Une question unique restee sans reponse
-        # n'accuse personne : la capture a pu s'arreter une milliseconde
-        # apres. La reemission, elle, est un acte du client - il a attendu
-        # son timeout, puis insiste. C'est la preuve que le silence a dure.
-        - "attempts >= 2"
+        # Il faut une PREUVE que le silence a dure. Deux formes l'apportent,
+        # et une seule suffit :
+        #   - la reemission : le client a attendu son timeout puis a insiste ;
+        #   - une observation longue : la capture a continue bien apres la
+        #     question sans que rien ne revienne.
+        # Sans la seconde forme, une question unique restee muette pendant
+        # cinq minutes ne produisait AUCUN verdict : `attempts >= 2` la
+        # rejetait, et « la capture s'arrete trop tot » ne s'appliquait plus
+        # (revue du 15/08/2026).
+        - any:
+            - "attempts >= 2"
+            - "observed_ms >= 5000"
     evidence:
       - "{attempts} questions pour {qname} ({qtype}) vers {resolver}, aucune reponse en {observed_ms:.0f} ms"
       - "resolveurs interroges : {resolvers_tried}"

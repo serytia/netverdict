@@ -247,3 +247,39 @@ def test_le_connect_qui_a_CREE_le_flux_est_bien_dans_le_flux():
     deux = attribution_for(fv, Timeline(events=[ev(99.997, 1, "le-vrai.exe"),
                                                 ev(101.5, 2, "un-autre.exe")]))
     assert deux.connection.pid == 1, "un parasite a battu le connect() du flux"
+
+
+def test_un_evenement_DANS_le_flux_prime_sur_un_plus_proche_mais_dehors():
+    """Verrou du terme `not dans_le_flux` du tri (correlate.py).
+
+    Le test precedent ne le prouvait pas : ses deux evenements tombaient tous
+    deux dans le flux, si bien que le tri par ecart suffisait a departager et
+    que retirer le terme laissait la suite verte (revue du 15/08/2026).
+    Il faut un evenement HORS du flux mais PLUS PROCHE de t_first que le bon.
+    """
+    from netverdict.correlate import attribution_for
+    from netverdict.signals import FlowSignals
+    from netverdict.rules.engine import FlowVerdict
+    from netverdict.timeline import Timeline, TimelineEvent, ConnectionInfo
+
+    # Flux de 100.0 a 102.0 ; marge causale = 1 s, donc « dans le flux » va
+    # de 99.0 a 102.0.
+    sig = FlowSignals(client="10.0.0.1", server="10.0.0.2", cport=5000,
+                      sport=443, t_first=100.0, duration_s=2.0)
+    fv = FlowVerdict(signals=sig)
+
+    def ev(ts, pid, image):
+        return TimelineEvent(
+            ts=ts, source="sysmon", host="h", category="service", severity=1,
+            ident="sysmon", message="connect", tz_known=True,
+            connection=ConnectionInfo(
+                src_ip="10.0.0.1", src_port=5000, dst_ip="10.0.0.2",
+                dst_port=443, protocol="tcp", image=image, pid=pid))
+
+    dehors_mais_proche = ev(98.5, 1, "parasite.exe")   # ecart 1.5, HORS flux
+    dedans_mais_loin = ev(102.0, 2, "le-vrai.exe")     # ecart 2.0, DANS le flux
+    a = attribution_for(fv, Timeline(events=[dehors_mais_proche,
+                                             dedans_mais_loin]))
+    assert a.connection.pid == 2, (
+        "un evenement hors du flux, mais plus proche, a ete prefere")
+    assert a.within_flow is True

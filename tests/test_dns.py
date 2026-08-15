@@ -549,3 +549,157 @@ def test_le_mdns_ne_declenche_aucune_accusation(dns_rules, regle_evitee, msgs):
     assert vs and vs[0].signals.is_mdns is True
     ids = [m.rule.id for m in vs[0].matches]
     assert regle_evitee not in ids, f"{regle_evitee} accuse du mDNS"
+
+
+# ------------------------ verrous de seuil (les constantes, pas leur echo)
+
+def test_les_seuils_sont_pinces_a_leur_valeur_et_non_a_eux_memes():
+    """Les tests ecrivaient leurs entrees en fonction des constantes
+    (`NEW_RESOLUTION_GAP_S + 10`), si bien que changer la constante deplacait
+    l'entree d'autant : elargir un seuil ne cassait rien. Porter
+    DELAY_ATTRIBUTION_WINDOW_S de 2 s a 60 s aurait fait affirmer qu'une
+    resolution « explique le delai » d'une connexion partie une minute plus
+    tard (revue du 15/08/2026)."""
+    from netverdict import dns as m
+    from netverdict import udp as mu
+
+    assert m.NEW_RESOLUTION_GAP_S == 30.0
+    assert m.NAMING_WINDOW_S == 300.0
+    assert m.DELAY_ATTRIBUTION_WINDOW_S == 2.0
+    assert m.CAPTURE_TAIL_S == 5.0
+    assert mu.SESSION_GAP_S == 120.0
+    # Et les ordres de grandeur qui donnent leur sens aux seuils : la fenetre
+    # d'attribution doit rester tres inferieure a la fenetre de nommage, elle
+    # meme inferieure au recyclage d'une conversation UDP.
+    assert m.DELAY_ATTRIBUTION_WINDOW_S < m.NEW_RESOLUTION_GAP_S < m.NAMING_WINDOW_S
+    assert m.CAPTURE_TAIL_S < m.NEW_RESOLUTION_GAP_S
+
+
+def test_une_capture_longue_ne_dit_plus_qu_elle_s_arrete_trop_tot():
+    """`capture_ends_first` etait arme des qu'une fin de capture etait connue -
+    toujours, depuis la CLI. Une question muette au debut d'une capture de cinq
+    minutes sortait « la capture s'arrete trop tot », avec la preuve « capture
+    terminee 300010 ms plus tard » juste en dessous."""
+    q_bytes = dns_bytes()
+    une = [parse_dns_datagram(0.0, CLIENT, RESOLVER, 5000, 53, q_bytes,
+                              len(q_bytes))]
+    courte = compute_dns_signals(build_resolutions(une, capture_end=0.5)[0], 0.5)
+    longue = compute_dns_signals(build_resolutions(une, capture_end=300.0)[0],
+                                 300.0)
+    assert courte.capture_ends_first is True
+    assert longue.capture_ends_first is False
+
+
+def test_une_question_muette_sur_une_longue_capture_est_signalee(dns_rules):
+    """Le pendant du test precedent : en resserrant `capture_ends_first`, il
+    ne faut pas creer un silence a la place. Une question sans reponse pendant
+    cinq minutes reste une information."""
+    q_bytes = dns_bytes()
+    une = [parse_dns_datagram(0.0, CLIENT, RESOLVER, 5000, 53, q_bytes,
+                              len(q_bytes))]
+    vs = _verdict(une, dns_rules, capture_end=300.0)
+    assert vs[0].primary is not None, "le silence du resolveur est passe sous"
+    assert vs[0].primary.rule.id == "dns-no-answer"
+
+
+def test_le_rattachement_choisit_la_resolution_ANTERIEURE_au_flux():
+    """Les tests de link_flows n'exercaient jamais plus d'une resolution : ni
+    la garde d'anteriorite, ni le choix de la plus recente n'etaient couverts."""
+    def rep(ts, adresse):
+        r = dns_bytes(response=True, answers=(adresse,))
+        return parse_dns_datagram(ts, RESOLVER, CLIENT, 53, 5000, r, len(r))
+
+    def dem(ts):
+        q = dns_bytes()
+        return parse_dns_datagram(ts, CLIENT, RESOLVER, 5000, 53, q, len(q))
+
+    # Deux resolutions du meme nom : 10.0.0.5 a t=1, puis 10.0.0.6 a t=100.
+    msgs = [dem(0.0), rep(1.0, "10.0.0.5"),
+            dem(99.0), rep(100.0, "10.0.0.6")]
+    res = build_resolutions(msgs, capture_end=200.0)
+    assert len(res) == 2
+    # Un flux vers .5 parti a t=50 : seule la PREMIERE resolution le precede.
+    liens = link_flows(res, [(0, "10.0.0.5", 50.0, CLIENT)])
+    assert liens[0].qname == "api.corp.local"
+    assert liens[0].explains_delay is False        # 49 s d'ecart
+    # Un flux vers .6 parti a t=100.5 : la seconde, et elle explique le delai.
+    liens = link_flows(res, [(0, "10.0.0.6", 100.5, CLIENT)])
+    assert liens[0].explains_delay is True
+    # Un flux vers .6 parti AVANT sa resolution : aucun rattachement possible.
+    assert link_flows(res, [(0, "10.0.0.6", 50.0, CLIENT)]) == {}
+
+
+def test_les_octets_tcp_53_sont_bien_conserves_par_le_lecteur(tmp_path):
+    """Seul pont entre un vrai pcap et parse_dns_over_tcp : pcap.py ne garde
+    le payload applicatif QUE pour le port 53. Aucun test ne l'exercait -
+    remplacer cette expression par b"" laissait la suite verte, alors que
+    toutes les resolutions portees par TCP/53 disparaissaient du rapport en
+    silence (revue du 15/08/2026)."""
+    import struct
+    from dpkt.tcp import TH_ACK, TH_PUSH
+    from netverdict.pcap import read_capture
+    from netverdict.dns import parse_dns_over_tcp, reassemble_stream
+
+    corps = dns_bytes(response=True, answers=("10.9.9.1",))
+    flux = struct.pack("!H", len(corps)) + corps
+
+    def seg(ts, sport, dport, seq, charge):
+        t = dpkt.tcp.TCP(sport=sport, dport=dport, flags=TH_PUSH | TH_ACK,
+                         seq=seq, ack=1, win=65535)
+        t.data = charge
+        ip = dpkt.ip.IP(src=socket.inet_aton(RESOLVER),
+                        dst=socket.inet_aton(CLIENT), p=dpkt.ip.IP_PROTO_TCP,
+                        ttl=64, id=1)
+        ip.data = t
+        ip.len = 20 + len(bytes(t))
+        e = dpkt.ethernet.Ethernet(src=b"\x02" * 6, dst=b"\x04" * 6,
+                                   type=dpkt.ethernet.ETH_TYPE_IP)
+        e.data = ip
+        return (ts, bytes(e))
+
+    chemin = tmp_path / "dns-tcp.pcap"
+    with open(chemin, "wb") as f:
+        w = dpkt.pcap.Writer(f)
+        for ts, buf in [seg(0.0, 53, 5000, 1000, flux),
+                        # Un segment sur un AUTRE port : son payload ne doit
+                        # PAS etre conserve (c'est tout l'interet de la garde).
+                        seg(0.1, 443, 5000, 2000, b"X" * 40)]:
+            w.writepkt(buf, ts=ts)
+
+    cap = read_capture(chemin)
+    par_port = {p.sport: p for p in cap.tcp_packets}
+    assert par_port[53].payload == flux, "les octets TCP/53 ont ete perdus"
+    assert par_port[443].payload == b"", "un port hors 53 a ete conserve"
+
+    # Et ces octets suffisent bien a reconstituer le message.
+    octets, complet = reassemble_stream([(par_port[53].seq,
+                                          par_port[53].payload)])
+    msgs = parse_dns_over_tcp(0.0, RESOLVER, CLIENT, 53, 5000, octets, complet)
+    assert len(msgs) == 1 and msgs[0].over_tcp is True
+    assert msgs[0].answers == ["10.9.9.1"]
+
+
+def test_une_reponse_PARSABLE_mais_tronquee_ne_publie_pas_ses_adresses():
+    """Verrou de la garde `if coupe` de parse_dns_datagram.
+
+    Les tests de troncature existants coupent la ou dpkt echoue de toute
+    facon : `_read_answers` rend alors ([], False) tout seul, et retirer la
+    garde ne cassait rien (revue du 15/08/2026). Le cas dangereux est
+    l'inverse - un message que dpkt parse SANS BRONCHER alors qu'il manque des
+    octets, ce qui arrive des qu'une section additionnelle (l'OPT record
+    d'EDNS0, par exemple) est coupee par le snaplen. Sans la garde, netverdict
+    publierait des adresses tirees d'un message incomplet comme si elles
+    etaient completes.
+    """
+    corps = dns_bytes(response=True, answers=("10.0.0.5",))
+    # dpkt lit ces octets parfaitement...
+    lisible, ok = __import__("netverdict.dns", fromlist=["_read_answers"])._read_answers(corps)
+    assert ok is True and lisible == ["10.0.0.5"]
+    # ...mais le datagramme d'origine en annoncait davantage.
+    m = parse_dns_datagram(1.0, RESOLVER, CLIENT, 53, 5000, corps,
+                           declared_len=len(corps) + 40)
+    assert m.capture_truncated is True
+    assert m.answers == [], "des adresses d'un message incomplet ont ete publiees"
+    assert m.answers_readable is False
+    # Et la latence, elle, reste juste : c'est tout l'interet du parseur maison.
+    assert m.rcode == 0 and m.is_response is True

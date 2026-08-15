@@ -55,6 +55,12 @@ SESSION_GAP_S = 120.0
 # adresse que celle interrogee, et ne se rattachent donc pas a la
 # conversation. Les inclure fabriquerait des « sans reponse » systematiques.
 ATTENDENT_UNE_REPONSE = {
+    # Le DNS en fait partie, et c'est ce qui ferme le trou annonce par le
+    # commentaire de cli.py : quand une question DNS est illisible (nom coupe
+    # par le snaplen), l'etage DNS ne produit AUCUNE resolution, donc
+    # `dns_handled` est faux - et sans le port 53 ici, personne ne disait rien
+    # du silence de ce resolveur (revue du 15/08/2026).
+    53: "DNS",
     123: "NTP", 161: "SNMP", 69: "TFTP", 88: "Kerberos", 111: "portmapper",
     389: "CLDAP", 500: "IKE", 4500: "IPsec NAT-T", 623: "IPMI", 2049: "NFS",
     1812: "RADIUS (auth)", 1813: "RADIUS (compta)", 1645: "RADIUS (auth, ancien)",

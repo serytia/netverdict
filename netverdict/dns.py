@@ -62,6 +62,18 @@ DNS_PORTS = frozenset({53, MDNS_PORT})
 # risquer de fusionner deux resolutions reellement distinctes.
 NEW_RESOLUTION_GAP_S = 30.0
 
+# Au-dela de ce delai apres la derniere tentative, la capture ne s'est PAS
+# arretee trop tot : le silence a eu le temps de se manifester. Cale sur le
+# timeout de reemission des resolveurs (1 a 5 s ; glibc RES_TIMEOUT = 5 s) -
+# passe ce delai, un client normal aurait deja rejoue sa question.
+#
+# Sans ce seuil, `capture_ends_first` etait vrai des qu'une fin de capture
+# etait connue, c'est-a-dire TOUJOURS depuis la CLI : une question restee sans
+# reponse au debut d'une capture de cinq minutes sortait « la capture s'arrete
+# trop tot », avec la preuve « capture terminee 300010 ms plus tard » juste en
+# dessous - le titre et sa preuve se contredisaient (revue du 15/08/2026).
+CAPTURE_TAIL_S = 5.0
+
 RCODES = {
     0: "NOERROR", 1: "FORMERR", 2: "SERVFAIL", 3: "NXDOMAIN", 4: "NOTIMP",
     5: "REFUSED", 6: "YXDOMAIN", 7: "YXRRSET", 8: "NXRRSET", 9: "NOTAUTH",
@@ -351,7 +363,9 @@ def build_resolutions(msgs: Iterable[DnsMsg], capture_end: Optional[float] = Non
     tcp53 = list(tcp53 or [])
     for res in resolutions:
         if res.response is None:
-            res.capture_ends_first = capture_end is not None
+            res.capture_ends_first = (
+                capture_end is not None
+                and capture_end - res.t_last_attempt <= CAPTURE_TAIL_S)
         if res.response is not None and res.response.dns_truncated:
             # Le repli doit suivre la reponse tronquee, pas la preceder.
             candidats = [t for t in tcp53

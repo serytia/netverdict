@@ -459,10 +459,25 @@ def read_capture(path: str | Path, lang: str = DEFAULT_LANG) -> Capture:
             elif isinstance(data, dpkt.udp.UDP):
                 st.udp += 1
                 # Longueur prise dans l'EN-TETE (ulen - 8) et non dans les
-                # octets capturés : sous snaplen, len(data.data) mentirait sur
+                # octets captures : sous snaplen, len(data.data) mentirait sur
                 # toutes les tailles - meme raisonnement que pour le TCP.
+                #
+                # Mais BORNEE par ce que l'en-tete IP autorise : un datagramme
+                # peut annoncer 65535 octets dans un paquet IP qui en fait 48,
+                # et ce mensonge ressortait tel quel dans bytes_c2s - donc dans
+                # la preuve de udp-mtu-blackhole (« {bytes_c2s} octets envoyes
+                # par le client »), c'est-a-dire precisement la ou la taille
+                # EST l'argument du verdict. Le chemin TCP, lui, derivait deja
+                # sa longueur de ip.len (revue du 15/08/2026).
                 charge_len = (data.ulen - 8) if data.ulen >= 8 \
                     else len(data.data or b"")
+                dispo = None
+                if isinstance(ip, dpkt.ip.IP):
+                    dispo = ip.len - (ip.hl * 4) - 8
+                elif hasattr(ip, "plen"):
+                    dispo = ip.plen - 8
+                if dispo is not None and dispo >= 0:
+                    charge_len = min(charge_len, dispo)
                 cap.udp_packets.append(UdpPkt(
                     ts=float(ts), src=_ip_str(ip.src), dst=_ip_str(ip.dst),
                     sport=data.sport, dport=data.dport,

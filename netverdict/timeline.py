@@ -31,14 +31,18 @@ from typing import Iterable, Optional
 # ferme ici, et applique des l'origine aux noms DNS - qui viennent, eux, de
 # paquets bruts que n'importe qui sur le chemin peut fabriquer.
 #
-# Ecrits en echappements et non en litteral : un controle bidi COLLE dans le
-# code source serait invisible dans l'editeur, donc irrelisable - le defaut
-# se cacherait dans son propre correctif.
+# Ecrits en ECHAPPEMENTS (\uXXXX) et jamais en litteral. Ce commentaire etait
+# la AVANT que ce soit vrai : la premiere version collait les caracteres
+# eux-memes, si bien que le fichier de la protection anti-bidi etait lui-meme
+# un fichier « Trojan Source » - rendu a l'envers par tout editeur appliquant
+# l'algorithme bidi, et signale par la banniere d'avertissement de GitHub. Le
+# defaut se cachait litteralement dans son propre correctif (revue du 15/08).
+# Un test parcourt desormais tout le depot pour que cela ne revienne pas.
 _CTRL_RE = re.compile(
     "[\x00-\x1f\x7f-\x9f"
-    "‎‏"          # LEFT-TO-RIGHT / RIGHT-TO-LEFT MARK
-    "‪-‮"         # EMBEDDING / POP / OVERRIDE
-    "⁦-⁩"         # ISOLATE : LRI, RLI, FSI, PDI
+    "\u200e\u200f"      # LEFT-TO-RIGHT / RIGHT-TO-LEFT MARK
+    "\u202a-\u202e"     # EMBEDDING / POP / OVERRIDE
+    "\u2066-\u2069"     # ISOLATE : LRI, RLI, FSI, PDI
     "]"
 )
 _MAX_TEXT = 300

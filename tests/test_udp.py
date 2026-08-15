@@ -298,3 +298,47 @@ def test_un_icmp_non_reconnu_ne_fait_plus_taire_l_etage(tmp_path, udp_rules):
     assert vs[0].primary is not None, "l'etage s'est taci malgre une erreur ICMP"
     assert vs[0].primary.rule.id == "udp-icmp-non-interprete"
     assert "type 3 code 1" in vs[0].primary.evidence[0]
+
+
+def test_deux_ports_hauts_laissent_le_sens_INCERTAIN(tmp_path):
+    """La troisieme branche de _oriente - aucun indice de port - pose aussi
+    direction_confident=False, et rien ne le verifiait : si ce False regressait
+    en True, le rapport cesserait d'afficher « sens devine » et presenterait
+    comme etabli un client que rien dans la capture ne distingue du serveur."""
+    cap = capture(tmp_path, [udp(0.0, CLIENT, SERVEUR, 41000, 45000),
+                             udp(0.1, CLIENT, SERVEUR, 41000, 45000, ident=2)])
+    conv = build_udp_conversations(cap)[0]
+    assert conv.direction_confident is False
+    # Et le cas nominal reste sur, lui.
+    cap2 = capture(tmp_path, [udp(0.0, CLIENT, SERVEUR, 40000, 123)],
+                   nom="nominal.pcap")
+    assert build_udp_conversations(cap2)[0].direction_confident is True
+
+
+def test_un_ulen_menteur_ne_gonfle_pas_les_octets_comptes(tmp_path):
+    """Un datagramme peut annoncer 65535 octets dans un paquet IP qui en fait
+    48. Ce mensonge passait entier dans bytes_c2s, donc dans la preuve de
+    udp-mtu-blackhole - c'est-a-dire precisement la ou la taille est
+    l'argument du verdict."""
+    u = dpkt.udp.UDP(sport=40000, dport=1812)
+    u.data = b"\x01" * 20
+    u.ulen = 65535                       # mensonge
+    trame = _eth(_ip(CLIENT, SERVEUR, dpkt.ip.IP_PROTO_UDP, u, 1))
+    cap = capture(tmp_path, [(0.0, trame)])
+    s = compute_udp_signals(build_udp_conversations(cap)[0])
+    assert s.bytes_c2s <= 40, f"ulen menteur passe : {s.bytes_c2s} octets"
+
+
+def test_le_port_53_compte_parmi_les_services_qui_repondent(tmp_path, udp_rules):
+    """Quand une question DNS est illisible (nom coupe par le snaplen), l'etage
+    DNS ne produit aucune resolution : `dns_handled` est faux, et c'est
+    l'etage UDP qui doit parler. Sans le port 53 dans la liste, personne ne
+    disait rien du silence de ce resolveur - le trou que le commentaire de
+    cli.py affirmait avoir bouche."""
+    from netverdict.udp import ATTENDENT_UNE_REPONSE
+    assert 53 in ATTENDENT_UNE_REPONSE
+    vs = verdicts(tmp_path, [udp(i * 5.0, CLIENT, SERVEUR, 40000, 53, ident=i)
+                             for i in range(3)], udp_rules)
+    assert vs[0].primary is not None
+    assert vs[0].primary.rule.id == "udp-known-service-silent"
+    assert vs[0].signals.service_hint == "DNS"
