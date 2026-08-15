@@ -149,6 +149,14 @@ def suspects_for(fv: FlowVerdict, timeline: Timeline,
 # la marge couvre un pcap et des events venant de deux hotes.
 CLOCK_TOLERANCE_S = 60.0
 
+# Marge CAUSALE : de combien un connect() peut preceder le premier paquet du
+# flux sans qu'il faille invoquer une derive d'horloge. L'appel systeme
+# precede l'emission de quelques microsecondes, mais les journaux datent a la
+# milliseconde et une machine chargee peut retarder l'ecriture : une seconde
+# couvre largement, sans jamais atteindre les dizaines de secondes ou la
+# question devient « est-ce vraiment ce flux ? ».
+CAUSALITE_S = 1.0
+
 
 @dataclass
 class ProcessAttribution:
@@ -287,7 +295,15 @@ def attribution_for(fv: FlowVerdict, timeline: Timeline,
         if match is None:
             continue
         side, exact = match
-        dans_le_flux = sig.t_first <= e.ts <= t_end
+        # La borne basse est ANTERIEURE au flux, et ce n'est pas un detail :
+        # un connect() PRECEDE toujours le paquet qu'il produit. Une premiere
+        # version comparait a `sig.t_first` tout court, si bien que
+        # l'attribution la plus banale qui soit - le connect() journalise
+        # trois millisecondes avant le SYN - etait declaree « hors du flux »,
+        # affichait un avertissement de derive d'horloge sans raison, et
+        # passait DERRIERE au tri : un evenement parasite tombant au milieu du
+        # flux battait le connect() qui l'avait cree. Revue du 15/08/2026.
+        dans_le_flux = (sig.t_first - CAUSALITE_S) <= e.ts <= t_end
         trouves.append((abs(e.ts - sig.t_first), e, side, exact, dans_le_flux))
 
     if not trouves:

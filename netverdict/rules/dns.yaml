@@ -44,7 +44,9 @@ rules:
          client (pas depuis un autre poste, le filtrage peut differer).
       2. Filtrage UDP/53 sur le chemin. Un pare-feu qui a perdu sa regle,
          ou un client deplace dans un autre VLAN, produisent exactement ce
-         silence - un DROP, pas un REJECT (sinon un ICMP serait visible).
+         silence. S'il s'agissait d'un REJECT, une erreur ICMP serait
+         visible : regarde la section « Conversations UDP » du rapport, qui
+         la signalerait explicitement.
       3. Etat du service resolveur lui-meme (charge, zone rechargee, arret).
       4. Le resolveur configure est-il le bon ? Verifier /etc/resolv.conf ou
          les DNS de l'interface Windows.
@@ -60,8 +62,9 @@ rules:
       1. Reachability: `dig @{resolver} {qname}` from THIS client (not from
          another host - filtering may differ).
       2. UDP/53 filtering along the path. A firewall that lost its rule, or a
-         client moved to another VLAN, produce exactly this silence - a DROP,
-         not a REJECT (a REJECT would show up as ICMP).
+         client moved to another VLAN, produce exactly this silence. Were it
+         a REJECT, an ICMP error would be visible: check the "UDP
+         conversations" section of the report, which would name it.
       3. The resolver service itself (load, zone reload, shutdown).
       4. Is the configured resolver the right one? Check /etc/resolv.conf or
          the Windows interface DNS settings.
@@ -297,6 +300,11 @@ rules:
     when:
       all:
         - "answered == true"
+        # Une reponse d'ERREUR n'a rien resolu : sans cette garde, un SERVFAIL
+        # ou un NXDOMAIN lent produisait « {qname} resolu en 1500 ms » et
+        # « adresses obtenues : » (vide), en plus - et en contradiction - du
+        # verdict d'erreur (revue du 15/08/2026).
+        - "rcode == 0"
         # mDNS exclu : sur un segment charge, une reponse multicast tardive
         # ne dit rien d'un service, et personne n'attend derriere.
         - "is_mdns == false"
@@ -315,9 +323,9 @@ rules:
       mesure de flux, et un verdict « transport sain » sur la connexion qui
       suit reste vrai pendant que l'utilisateur attend.
       Ou chercher, selon la forme :
-      - {attempts} question(s) : plusieurs questions signent une perte sur le
-        chemin DNS ; le delai est alors le TIMEOUT du client, pas le temps de
-        reflexion du serveur.
+      - si plusieurs questions ont ete posees ({attempts} ici) : la perte est
+        sur le chemin DNS, et le delai est le TIMEOUT du client, pas le temps
+        de reflexion du serveur.
       - une seule question et une reponse tardive : c'est le resolveur qui
         met ce temps a repondre (recursion vers l'exterieur, cache froid,
         forwarder injoignable qui expire avant repli).
@@ -332,8 +340,9 @@ rules:
       measurement, and a "healthy transport" verdict on the connection that
       follows stays true while the user waits.
       Where to look, depending on the shape:
-      - {attempts} query(ies): several queries mean loss on the DNS path; the
-        delay is then the client's TIMEOUT, not the server's thinking time.
+      - if several queries were sent ({attempts} here): the loss is on the DNS
+        path, and the delay is the client's TIMEOUT, not the server's
+        thinking time.
       - a single query and a late answer: the resolver itself takes that long
         (outbound recursion, cold cache, unreachable forwarder timing out
         before fallback).
@@ -350,6 +359,7 @@ rules:
       all:
         - "answered == true"
         - "attempts >= 2"
+        - "rcode == 0"          # voir dns-slow : une erreur n'a rien resolu
         - "is_mdns == false"
     unless:
       # dns-slow dit deja tout quand l'attente depasse la seconde ; deux

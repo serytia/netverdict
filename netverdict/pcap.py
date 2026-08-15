@@ -25,13 +25,13 @@ from typing import BinaryIO, Iterator, Optional
 import dpkt
 
 from .dns import DNS_PORTS, DnsMsg, parse_dns_datagram
+from .i18n import DEFAULT_LANG, t
 
 # Plafond des octets conserves par segment TCP/53. Une reponse DNS sur TCP
 # peut atteindre 64 Ko, mais celles qui comptent en diagnostic (une zone qui a
 # grossi, un AXFR refuse) tiennent tres en dessous : 8 Ko bornent la memoire
 # sans rien perdre d'utile.
 MAX_TCP_PAYLOAD_KEPT = 8192
-from .i18n import DEFAULT_LANG, t
 
 # Linktypes rencontres en pratique sur les captures d'admins.
 # (tcpdump Linux = EN10MB ou LINUX_SLL selon -i any ; pktmon Windows = EN10MB ;
@@ -492,5 +492,6 @@ def read_capture(path: str | Path, lang: str = DEFAULT_LANG) -> Capture:
     # capture, mais un merge de captures (mergecap) peut desordonner :
     # tout l'etage signaux suppose le temps croissant, on garantit ici.
     cap.tcp_packets.sort(key=lambda p: p.ts)
+    cap.udp_packets.sort(key=lambda p: p.ts)
     cap.icmp_events.sort(key=lambda e: e.ts)
     return cap

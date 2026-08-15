@@ -135,11 +135,16 @@ def build_udp_conversations(cap: Capture) -> list[UdpConversation]:
 
     # Rattachement des erreurs ICMP concernant de l'UDP. Elles portent le
     # quadruplet du datagramme fautif, donc le sens de la QUESTION.
+    # UN SEUL SENS : le paquet fautif doit aller du client vers le serveur.
+    # Enregistrer aussi le sens inverse faisait qu'un ICMP port-unreachable
+    # emis par le CLIENT - a propos d'une reponse arrivee apres la fermeture
+    # de son socket, ce qui est banal - declenchait « rien n'ecoute sur ce
+    # port » CONTRE LE SERVEUR, avec confiance haute. L'outil accusait la
+    # machine qui avait correctement repondu (revue du 15/08/2026).
     par_endpoints: dict[tuple, list[UdpConversation]] = {}
     for conv in conversations:
-        for cle in (((conv.client, conv.cport), (conv.server, conv.sport)),
-                    ((conv.server, conv.sport), (conv.client, conv.cport))):
-            par_endpoints.setdefault(cle, []).append(conv)
+        cle = ((conv.client, conv.cport), (conv.server, conv.sport))
+        par_endpoints.setdefault(cle, []).append(conv)
     for ev in cap.icmp_events:
         if ev.orig_proto != dpkt.ip.IP_PROTO_UDP:
             continue
@@ -177,6 +182,13 @@ class UdpSignals:
     icmp_frag_needed: bool = False
     icmp_from: str = ""
     icmp_count: int = 0
+    # Une erreur ICMP recue mais qu'aucune des trois categories ci-dessus ne
+    # couvre (host-unreachable, network-unreachable, TTL exceeded, un code
+    # v6...). Sans ce champ, elle ne declenchait AUCUN verdict tout en armant
+    # le garde `icmp_count == 0` : plus de preuve rendait MOINS de verdict, et
+    # le code retour repassait a 0 (revue du 15/08/2026).
+    icmp_other: bool = False
+    icmp_other_label: str = ""
     # Le port serveur est-il un service dont on SAIT qu'il repond ? C'est la
     # seule condition qui autorise a dire quoi que ce soit d'un silence.
     expects_reply: bool = False
@@ -196,17 +208,32 @@ def compute_udp_signals(conv: UdpConversation,
     s2c = [p for p in conv.pkts if not p[1]]
     t0 = conv.pkts[0][0] if conv.pkts else 0.0
     t1 = conv.pkts[-1][0] if conv.pkts else 0.0
+    # `repondu` exige une reponse POSTERIEURE a la premiere question. Compter
+    # n'importe quel datagramme serveur (bool(s2c)) faisait passer une
+    # conversation totalement sans reponse pour un « echange bidirectionnel
+    # sans erreur » des qu'un datagramme du serveur - reste d'un echange
+    # precedent sur le meme quadruplet, ou capture commencee en plein milieu -
+    # trainait AVANT la question (revue du 15/08/2026).
     premiere_reponse = None
+    repondu = False
     if c2s and s2c:
-        # Le premier retour POSTERIEUR a la premiere question : un datagramme
-        # serveur anterieur appartient a un echange precedent, pas a celui-ci.
         apres = [p[0] for p in s2c if p[0] >= c2s[0][0]]
         if apres:
+            repondu = True
             premiere_reponse = (apres[0] - c2s[0][0]) * 1000.0
+    elif s2c and not c2s:
+        # Que du trafic serveur et aucune question : l'orientation a ete
+        # devinee, on ne prononce pas le mot « repondu ».
+        repondu = False
     ic_unreach = any(e.is_port_unreachable for e in conv.icmp)
     ic_admin = any(e.is_admin_prohibited for e in conv.icmp)
     ic_frag = any(e.is_frag_needed for e in conv.icmp)
     emetteur = next((e.icmp_src for e in conv.icmp), "")
+    autres = [e for e in conv.icmp
+              if not (e.is_port_unreachable or e.is_admin_prohibited
+                      or e.is_frag_needed)]
+    label_autre = (f"type {autres[0].type} code {autres[0].code}"
+                   if autres else "")
     service = ATTENDENT_UNE_REPONSE.get(conv.sport, "")
     return UdpSignals(
         client=conv.client, server=conv.server,
@@ -215,13 +242,15 @@ def compute_udp_signals(conv: UdpConversation,
         t_first=t0, duration_s=max(0.0, t1 - t0),
         pkts_c2s=len(c2s), pkts_s2c=len(s2c),
         bytes_c2s=sum(p[2] for p in c2s), bytes_s2c=sum(p[2] for p in s2c),
-        answered=bool(s2c),
+        answered=repondu,
         first_response_ms=premiere_reponse,
         icmp_port_unreachable=ic_unreach,
         icmp_admin_prohibited=ic_admin,
         icmp_frag_needed=ic_frag,
         icmp_from=emetteur,
         icmp_count=len(conv.icmp),
+        icmp_other=bool(autres),
+        icmp_other_label=label_autre,
         expects_reply=bool(service),
         service_hint=service,
         dns_handled=dns_handled,

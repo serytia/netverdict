@@ -204,13 +204,21 @@ def render_console(cap: Capture, verdicts: list[FlowVerdict],
             noms_vers_flux.setdefault(lien.qname, []).append(
                 f"{s.server}:{s.sport}")
         dns_sains = 0
+        dns_muets = 0
         coupees = 0
         entete_posee = False
         for dv in sorted(dns_verdicts, key=lambda d: d.signals.t_first):
             ds = dv.signals
             if ds.capture_truncated and not ds.answers_readable and ds.answered:
                 coupees += 1
-            if dv.primary is None or dv.verdict == "RAS":
+            # RAS et « aucune regle n'a matche » ne sont PAS la meme chose :
+            # le premier est un verdict rendu, le second un silence. Les
+            # confondre faisait annoncer « N resolutions saines » a propos de
+            # resolutions dont l'outil n'avait rien su dire (revue du 15/08).
+            if dv.primary is None:
+                dns_muets += 1
+                continue
+            if dv.verdict == "RAS":
                 dns_sains += 1
                 continue
             if not entete_posee:
@@ -242,6 +250,9 @@ def render_console(cap: Capture, verdicts: list[FlowVerdict],
         if dns_sains:
             con.print(Text(t("report.dns_healthy", lang, n=dns_sains),
                            style="dim"))
+        if dns_muets:
+            con.print(Text(t("report.dns_silent", lang, n=dns_muets),
+                           style="dim"))
 
     # --- Conversations UDP ----------------------------------------------
     # Apres le DNS et avant le TCP : ce sont des echanges de meme nature que
@@ -249,10 +260,15 @@ def render_console(cap: Capture, verdicts: list[FlowVerdict],
     # datagramme ne prouve ni la reception, ni le sens, ni la perte.
     if udp_verdicts:
         udp_sains = 0
+        udp_muets = 0
         entete_posee = False
         for uv in sorted(udp_verdicts, key=lambda u: u.signals.t_first):
             us = uv.signals
-            if uv.primary is None or uv.verdict == "RAS":
+            # Voir la section DNS : un silence n'est pas une sante.
+            if uv.primary is None:
+                udp_muets += 1
+                continue
+            if uv.verdict == "RAS":
                 udp_sains += 1
                 continue
             if not entete_posee:
@@ -282,6 +298,9 @@ def render_console(cap: Capture, verdicts: list[FlowVerdict],
             con.print(Panel(body, title=title, border_style=style.split()[-1]))
         if udp_sains:
             con.print(Text(t("report.udp_healthy", lang, n=udp_sains),
+                           style="dim"))
+        if udp_muets:
+            con.print(Text(t("report.udp_silent", lang, n=udp_muets),
                            style="dim"))
 
     ordered = sorted(verdicts, key=_sort_key)

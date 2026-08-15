@@ -362,9 +362,20 @@ def build_resolutions(msgs: Iterable[DnsMsg], capture_end: Optional[float] = Non
             # une REPONSE DNS lue sur ce TCP prouve qu'il a abouti. La seconde
             # preuve est meilleure et prime quand elle existe : une session
             # etablie peut tres bien se faire couper avant la reponse.
+            # Le repli doit venir du MEME client et du MEME resolveur. Sans
+            # ces deux filtres - presents deux lignes plus haut pour
+            # `tcp_retry_seen`, absents ici - n'importe quelle reussite TCP/53
+            # ailleurs dans la capture effacait l'echec constate ici : un
+            # client qui bascule sur son second nameserver, ou une capture de
+            # port-miroir ou un autre hote reussit son repli, suffisaient a
+            # faire disparaitre le verdict phare du module. Le qtype est
+            # volontairement ignore (getaddrinfo emet A et AAAA pour le meme
+            # nom, et un repli TCP reussi sur l'un vaut pour l'autre).
             reponse_tcp = any(
                 autre.response is not None and autre.response.over_tcp
                 and autre.qname.lower() == res.qname.lower()
+                and autre.client == res.client
+                and autre.response.src in res.resolvers
                 and autre.response.ts >= res.response.ts
                 for autre in resolutions if autre is not res)
             res.tcp_retry_ok = reponse_tcp or any(
@@ -430,7 +441,15 @@ def compute_dns_signals(res: DnsResolution,
         qname=res.qname,
         qtype=qtype_name(res.qtype),
         client=res.client,
-        resolver=res.resolvers[0] if res.resolvers else "",
+        # Celui qui a REPONDU, pas le premier interroge. Toutes les regles se
+        # servent de ce champ pour DESIGNER un responsable (« {resolver}
+        # repond SERVFAIL », « {resolver} refuse »), et un client a
+        # generalement deux nameservers : quand le premier se tait et que le
+        # second repond une erreur, la version precedente accusait le premier,
+        # c'est-a-dire la machine qui n'avait rien dit. Le premier interroge
+        # ne sert de repli que faute de reponse (revue du 15/08/2026).
+        resolver=(rep.src if rep is not None
+                  else (res.resolvers[0] if res.resolvers else "")),
         resolvers_tried=len(res.resolvers),
         attempts=len(res.attempts),
         answered=rep is not None,
@@ -484,26 +503,34 @@ NAMING_WINDOW_S = 300.0
 
 
 def link_flows(resolutions: Iterable[DnsResolution],
-               flows: Iterable[tuple[int, str, float]],
+               flows: Iterable[tuple],
                ) -> dict[int, FlowDnsLink]:
     """Rattache chaque flux TCP au nom qui l'a produit.
 
-    `flows` : (index du flux, adresse du serveur, horodatage du 1er paquet).
-    Volontairement des primitifs et non des FlowSignals : ce module est lu par
-    pcap.py, et l'importer creerait un cycle."""
+    `flows` : (index du flux, adresse du serveur, horodatage du 1er paquet,
+    adresse du CLIENT). Volontairement des primitifs et non des FlowSignals :
+    ce module est lu par pcap.py, et l'importer creerait un cycle.
+
+    Le client est INDISPENSABLE : c'est lui qui distingue « cette machine a
+    attendu la resolution » de « une autre machine l'a resolue, celle-ci
+    l'avait en cache ». Sans lui, le rapport attribuait a un hote le delai
+    subi par un autre."""
     par_adresse = resolved_addresses(resolutions)
-    detail = {(r.response.ts, r.qname): r for r in resolutions
+    detail = {(r.response.ts, r.qname, r.client): r for r in resolutions
               if r.response is not None}
     out: dict[int, FlowDnsLink] = {}
-    for index, serveur, t_first in flows:
-        candidats = [(ts, nom) for ts, nom in par_adresse.get(serveur, [])
-                     if ts <= t_first and t_first - ts <= NAMING_WINDOW_S]
+    for entree in flows:
+        index, serveur, t_first = entree[0], entree[1], entree[2]
+        client = entree[3] if len(entree) > 3 else None
+        candidats = [(ts, nom, cli) for ts, nom, cli in par_adresse.get(serveur, [])
+                     if ts <= t_first and t_first - ts <= NAMING_WINDOW_S
+                     and (client is None or cli == client)]
         if not candidats:
             continue
         # La plus RECENTE anterieure au flux : si le nom a ete resolu deux
         # fois, c'est la derniere reponse qui a fourni l'adresse utilisee.
-        ts, nom = max(candidats, key=lambda c: c[0])
-        res = detail.get((ts, nom))
+        ts, nom, cli = max(candidats, key=lambda c: c[0])
+        res = detail.get((ts, nom, cli))
         lat = None
         if res is not None and res.attempts:
             lat = (res.response.ts - res.t_first) * 1000.0
@@ -514,17 +541,24 @@ def link_flows(resolutions: Iterable[DnsResolution],
     return out
 
 
-def resolved_addresses(resolutions: Iterable[DnsResolution]) -> dict[str, list[tuple[float, str]]]:
-    """adresse -> [(ts de la reponse, nom)], pour nommer les flux TCP.
+def resolved_addresses(resolutions: Iterable[DnsResolution],
+                       ) -> dict[str, list[tuple[float, str, str]]]:
+    """adresse -> [(ts de la reponse, nom, CLIENT qui a resolu)].
 
     Une adresse peut porter plusieurs noms (hebergement mutualise, VIP) et un
     nom changer d'adresse pendant la capture : on garde TOUT, horodate, et
-    c'est l'appelant qui choisit l'entree anterieure au flux."""
-    out: dict[str, list[tuple[float, str]]] = {}
+    c'est l'appelant qui choisit.
+
+    Le CLIENT fait partie du triplet depuis la revue du 15/08/2026. Sans lui,
+    une capture multi-hotes - port-miroir, capture cote serveur, c'est-a-dire
+    le cas courant - attachait la resolution lente d'une machine au flux TCP
+    d'une AUTRE, en affirmant « precede de 2400 ms de resolution ». Le second
+    hote avait le nom en cache et n'avait rien attendu."""
+    out: dict[str, list[tuple[float, str, str]]] = {}
     for res in resolutions:
         rep = res.response
         if rep is None or not rep.answers_readable:
             continue
         for adresse in rep.answers:
-            out.setdefault(adresse, []).append((rep.ts, res.qname))
+            out.setdefault(adresse, []).append((rep.ts, res.qname, res.client))
     return out

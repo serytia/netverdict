@@ -19,8 +19,8 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     from .rules.engine import (load_rules, load_dns_rules, load_udp_rules,
                                evaluate, evaluate_dns, evaluate_udp, RuleError)
     from .report import render_console, to_json
-    from .dns import (build_resolutions, compute_dns_signals, link_flows,
-                      parse_dns_over_tcp, reassemble_stream)
+    from .dns import (MDNS_PORT, build_resolutions, compute_dns_signals,
+                      link_flows, parse_dns_over_tcp, reassemble_stream)
     from .udp import build_udp_conversations, compute_udp_signals
     from .hostsnap import HostSnapshot
 
@@ -82,20 +82,29 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     dns_verdicts = evaluate_dns(
         [compute_dns_signals(r, cap.t_last_seen) for r in resolutions],
         dns_rules, lang)
-    dns_links = link_flows(resolutions,
-                           [(i, s.server, s.t_first) for i, s in enumerate(signals)])
+    dns_links = link_flows(
+        resolutions,
+        [(i, s.server, s.t_first, s.client) for i, s in enumerate(signals)])
 
     # Etage UDP. Il couvre TOUT l'UDP, DNS compris, mais se tait sur les
     # conversations dont l'etage DNS a su tirer une resolution : ses verdicts
     # y sont plus precis. L'inverse aurait laisse un trou - un DNS dont le nom
     # est illisible (snaplen) ne produit aucune resolution, et personne
     # n'aurait alors rien dit du silence de son resolveur.
+    # La cle porte le PORT SERVEUR et TOUS les resolveurs essayes. Sans le
+    # port, une simple resolution entre deux machines suffisait a marquer
+    # `dns_handled` sur TOUTE conversation UDP entre ces deux machines - le
+    # NTP, le RADIUS ou le syslog vers le meme serveur devenaient muets. Sans
+    # la totalite des resolveurs, un client a deux nameservers ne voyait
+    # couvert que le premier (revue du 15/08/2026).
     conversations = build_udp_conversations(cap)
-    couvert_par_dns = {(r.client, r.resolvers[0] if r.resolvers else "")
-                       for r in resolutions if r.attempts}
+    couvert_par_dns = {(r.client, srv, port)
+                       for r in resolutions if r.attempts
+                       for srv in r.resolvers
+                       for port in (53, MDNS_PORT)}
     udp_verdicts = evaluate_udp(
         [compute_udp_signals(
-            c, dns_handled=(c.client, c.server) in couvert_par_dns)
+            c, dns_handled=(c.client, c.server, c.sport) in couvert_par_dns)
          for c in conversations],
         udp_rules, lang)
 
@@ -356,18 +365,26 @@ def cmd_compare(args: argparse.Namespace) -> int:
 
 
 def cmd_rules(args: argparse.Namespace) -> int:
-    from .rules.engine import load_rules, RuleError
+    from .rules.engine import (load_rules, load_dns_rules, load_udp_rules,
+                               RuleError)
     lang = resolve_lang(args.lang)
     try:
-        rules = load_rules(args.rules)
+        # LES TROIS contrats, pas seulement les flux TCP. Cette commande sert a
+        # ecrire des regles : n'en montrer qu'un tiers cachait l'existence des
+        # scopes dns et udp, et surtout ne VALIDAIT pas les regles utilisateur
+        # portant ces scopes - un `--rules` fautif restait donc muet ici avant
+        # d'exploser au milieu d'une analyse (revue du 15/08/2026).
+        rules = (load_rules(args.rules) + load_dns_rules(args.rules)
+                 + load_udp_rules(args.rules))
     except RuleError as e:
         print(t("err.rules", lang, e=e), file=sys.stderr)
         return 2
     # Le JETON de verdict est garde tel quel ici, et non son libelle : cette
     # sortie sert a ecrire des regles (--rules), donc a manipuler des
     # identifiants. Seul le titre suit la langue.
-    for r in sorted(rules, key=lambda x: -x.priority):
-        print(f"{r.priority:>3}  {r.verdict:<7} {r.id:<22} {r.title_for(lang)}")
+    for r in sorted(rules, key=lambda x: (x.scope, -x.priority)):
+        print(f"{r.scope:<5} {r.priority:>3}  {r.verdict:<7} {r.id:<30} "
+              f"{r.title_for(lang)}")
     return 0
 
 

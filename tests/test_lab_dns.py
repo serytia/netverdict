@@ -78,7 +78,7 @@ def analyse(nom):
     res = build_resolutions(msgs, cap.t_last_seen, tcp53)
     dns = evaluate_dns([compute_dns_signals(r, cap.t_last_seen) for r in res],
                        load_dns_rules())
-    liens = link_flows(res, [(i, s.server, s.t_first)
+    liens = link_flows(res, [(i, s.server, s.t_first, s.client)
                              for i, s in enumerate(signals)])
     return cap, verdicts, dns, liens
 

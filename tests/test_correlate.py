@@ -212,3 +212,38 @@ def test_une_attribution_hors_du_flux_annonce_la_tolerance_d_horloge():
     # Et quand les deux existent, celui qui tombe DANS le flux gagne.
     les_deux = attribution_for(fv, Timeline(events=[event(142.0), event(101.0)]))
     assert les_deux.within_flow is True
+
+
+def test_le_connect_qui_a_CREE_le_flux_est_bien_dans_le_flux():
+    """Regression introduite le 15/08 et trouvee en revue : `dans_le_flux`
+    comparait a `sig.t_first` tout court, alors qu'un connect() PRECEDE
+    toujours le paquet qu'il produit. L'attribution la plus banale qui soit -
+    le connect() journalise trois millisecondes avant le SYN - etait donc
+    declaree hors du flux, affichait un avertissement de derive d'horloge sans
+    raison, et passait DERRIERE au tri."""
+    from netverdict.correlate import attribution_for
+    from netverdict.signals import FlowSignals
+    from netverdict.rules.engine import FlowVerdict
+    from netverdict.timeline import Timeline, TimelineEvent, ConnectionInfo
+
+    sig = FlowSignals(client="10.0.0.1", server="10.0.0.2", cport=5000,
+                      sport=443, t_first=100.0, duration_s=2.0)
+    fv = FlowVerdict(signals=sig)
+
+    def ev(ts, pid, image):
+        return TimelineEvent(
+            ts=ts, source="sysmon", host="h", category="service", severity=1,
+            ident="sysmon", message="connect", tz_known=True,
+            connection=ConnectionInfo(
+                src_ip="10.0.0.1", src_port=5000, dst_ip="10.0.0.2",
+                dst_port=443, protocol="tcp", image=image, pid=pid))
+
+    # 3 ms AVANT le premier paquet : c'est le cas NORMAL.
+    a = attribution_for(fv, Timeline(events=[ev(99.997, 1, "app.exe")]))
+    assert a.within_flow is True
+    assert "tolerance" not in a.describe("fr")
+
+    # Et il doit BATTRE un evenement parasite tombant au milieu du flux.
+    deux = attribution_for(fv, Timeline(events=[ev(99.997, 1, "le-vrai.exe"),
+                                                ev(101.5, 2, "un-autre.exe")]))
+    assert deux.connection.pid == 1, "un parasite a battu le connect() du flux"

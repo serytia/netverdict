@@ -17,9 +17,18 @@ Worth stating plainly, because the tool is fed packet captures:
   rules and rendering the report never touch the network.
 - **`--explain` is the one exception, and it is opt-in.** It sends the JSON
   report — signals and verdicts — to the Claude API. **It never sends the
-  pcap.** That JSON does contain IP addresses, ports, resolved DNS names and,
-  when host sources are used, process names and usernames. Do not use it on
-  captures you are not allowed to send to a third party.
+  pcap.** But be precise about what that report contains, because it is more
+  than verdicts:
+  - IP addresses, ports, and resolved DNS names (your internal hostnames);
+  - process names, PIDs and **usernames**, when host sources are used;
+  - **the message body of every timeline entry** — that is, the actual text
+    of the Windows events, syslog lines or audit records you passed with
+    `--events` / `--syslog` / `--audit`, truncated to 300 characters each.
+    Those lines routinely carry hostnames, account names, paths and
+    command lines.
+
+  Do not use `--explain` on data you are not allowed to send to a third
+  party. Everything else works without it.
 - **No telemetry, no auto-update, no phone-home.**
 
 ## Handling captures

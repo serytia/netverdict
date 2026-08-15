@@ -94,10 +94,10 @@ STRINGS: dict[str, dict[str, str]] = {
     "report.header": {
         "fr": "{total} paquets lus — {tcp} TCP, {udp} UDP, {icmp} ICMP, "
               "{other} autres IP, {non_ip} non-IP, {frags} fragments, "
-              "{errors} illisibles — {flows} conversations",
+              "{errors} illisibles — {flows} conversations TCP",
         "en": "{total} packets read — {tcp} TCP, {udp} UDP, {icmp} ICMP, "
               "{other} other IP, {non_ip} non-IP, {frags} fragments, "
-              "{errors} unreadable — {flows} conversations",
+              "{errors} unreadable — {flows} TCP conversations",
     },
     "report.udp_header": {
         "fr": "Conversations UDP",
@@ -126,6 +126,16 @@ STRINGS: dict[str, dict[str, str]] = {
     "report.dns_healthy": {
         "fr": "{n} resolution(s) DNS saine(s)",
         "en": "{n} healthy DNS resolution(s)",
+    },
+    "report.dns_silent": {
+        "fr": "{n} resolution(s) DNS sur lesquelles aucune regle ne s'est "
+              "prononcee",
+        "en": "{n} DNS resolution(s) no rule had anything to say about",
+    },
+    "report.udp_silent": {
+        "fr": "{n} conversation(s) UDP sur lesquelles aucune regle ne s'est "
+              "prononcee",
+        "en": "{n} UDP conversation(s) no rule had anything to say about",
     },
     "report.dns_name_hint": {
         "fr": "nom resolu : {qname}",

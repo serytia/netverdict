@@ -448,3 +448,104 @@ def test_une_capture_sans_dns_ne_gagne_aucune_section(capsys):
     out = _json.loads(capsys.readouterr().out)
     assert out["dns"] == []
     assert out["stats"]["udp"] == 0
+
+
+# ---------------------------------------------- verrous poses par la revue
+
+def test_le_resolveur_accuse_est_celui_qui_a_repondu(dns_rules):
+    """Un client a deux nameservers. Quand le premier se tait et que le second
+    repond une erreur, la version d'origine accusait le PREMIER - c'est-a-dire
+    la machine qui n'avait rien dit (revue du 15/08/2026)."""
+    ns1, ns2 = "10.0.0.53", "10.0.0.54"
+    q_bytes = dns_bytes()
+    e_bytes = dns_bytes(response=True, rcode=2)
+    msgs = [parse_dns_datagram(0.0, CLIENT, ns1, 5000, 53, q_bytes, len(q_bytes)),
+            parse_dns_datagram(5.0, CLIENT, ns2, 5000, 53, q_bytes, len(q_bytes)),
+            parse_dns_datagram(5.1, ns2, CLIENT, 53, 5000, e_bytes, len(e_bytes))]
+    res = build_resolutions(msgs, capture_end=10.0)
+    s = compute_dns_signals(res[0], 10.0)
+    assert s.resolver == ns2, "le rapport accuserait le resolveur muet"
+    vs = evaluate_dns([s], dns_rules, lang="fr")
+    assert ns2 in vs[0].primary.evidence[0]
+
+
+def test_un_repli_tcp_reussi_AILLEURS_n_efface_pas_l_echec_ici(dns_rules):
+    """Le test `reponse_tcp` ne filtrait ni le client ni le resolveur : une
+    reussite TCP/53 n'importe ou dans la capture effacait l'echec constate
+    ici, et le verdict phare du module disparaissait."""
+    from netverdict.dns import parse_dns_over_tcp
+    ns1, ns2 = "10.0.0.53", "10.0.0.54"
+    # NS1 tronque et son repli TCP est mort.
+    q_bytes = dns_bytes()
+    tc_bytes = dns_bytes(response=True, tc=True)
+    msgs = [parse_dns_datagram(0.0, CLIENT, ns1, 5000, 53, q_bytes, len(q_bytes)),
+            parse_dns_datagram(0.1, ns1, CLIENT, 53, 5000, tc_bytes,
+                               len(tc_bytes))]
+    # Le client rejoue le MEME nom sur NS2, et la ca marche.
+    msgs += parse_dns_over_tcp(1.0, CLIENT, ns2, 5001, 53,
+                               _flux_tcp(question=True), complet=True)
+    msgs += parse_dns_over_tcp(1.1, ns2, CLIENT, 53, 5001,
+                               _flux_tcp(), complet=True)
+    vs = _verdict(msgs, dns_rules,
+                  tcp53=[(0.2, CLIENT, ns1, False), (1.0, CLIENT, ns2, True)])
+    accusations = [m.rule.id for v in vs for m in v.matches
+                   if m.rule.id.startswith("dns-truncated")]
+    assert "dns-truncated-tcp-retry-failed" in accusations, (
+        "la reussite sur NS2 a efface l'echec de NS1")
+
+
+def test_une_resolution_lente_EN_ERREUR_n_affirme_pas_avoir_resolu(dns_rules):
+    """dns-slow ne regardait pas le rcode : un SERVFAIL lent produisait
+    « {qname} resolu en 1500 ms » et « adresses obtenues : » (vide), en
+    contradiction avec le verdict d'erreur rendu juste a cote."""
+    vs = _verdict([msg(0.0), msg(1.5, response=True, rcode=2)], dns_rules)
+    ids = [m.rule.id for m in vs[0].matches]
+    assert "dns-servfail" in ids
+    assert "dns-slow" not in ids
+
+
+def test_le_delai_d_un_hote_n_est_pas_impute_au_flux_d_un_autre():
+    """Sur une capture multi-hotes - port-miroir, capture cote serveur - la
+    resolution lente d'une machine etait attachee au flux TCP d'une AUTRE,
+    en affirmant « ce delai s'ajoute a ce que l'utilisateur a subi »."""
+    a, b = "10.0.0.5", "10.0.0.77"
+    q_bytes = dns_bytes()
+    r_bytes = dns_bytes(response=True, answers=("10.0.0.30",))
+    msgs = [parse_dns_datagram(0.0, a, RESOLVER, 5000, 53, q_bytes, len(q_bytes)),
+            parse_dns_datagram(2.4, RESOLVER, a, 53, 5000, r_bytes, len(r_bytes))]
+    res = build_resolutions(msgs, capture_end=20.0)
+    # Le flux appartient a B, qui n'a emis AUCUN paquet DNS.
+    liens = link_flows(res, [(0, "10.0.0.30", 2.9, b)])
+    assert liens == {}, "le delai de A a ete impute au flux de B"
+    # Et pour A, le rattachement reste bien fait.
+    liens = link_flows(res, [(0, "10.0.0.30", 2.9, a)])
+    assert liens[0].explains_delay is True
+
+
+@pytest.mark.parametrize("regle_evitee, msgs", [
+    ("dns-no-answer", [0.0, 5.0]),
+    ("dns-slow", None),
+])
+def test_le_mdns_ne_declenche_aucune_accusation(dns_rules, regle_evitee, msgs):
+    """La clause `is_mdns == false` protege quatre regles, et aucun test ne
+    l'exercait (revue du 15/08). Une question multicast sans reponse est le
+    fonctionnement NORMAL du protocole : accuser ferait un faux positif sur
+    n'importe quelle capture de LAN."""
+    from netverdict.dns import MDNS_PORT
+
+    def m_mdns(ts, response=False, qname="printer.local"):
+        raw = dns_bytes(qname=qname, response=response,
+                        answers=("10.0.0.7",) if response else ())
+        src, dst = (("224.0.0.251", CLIENT) if response
+                    else (CLIENT, "224.0.0.251"))
+        return parse_dns_datagram(ts, src, dst, MDNS_PORT, MDNS_PORT, raw,
+                                  len(raw))
+
+    if msgs is None:                    # resolution mDNS LENTE
+        paquets = [m_mdns(0.0), m_mdns(2.0, response=True)]
+    else:                               # questions mDNS sans reponse
+        paquets = [m_mdns(t) for t in msgs]
+    vs = _verdict(paquets, dns_rules)
+    assert vs and vs[0].signals.is_mdns is True
+    ids = [m.rule.id for m in vs[0].matches]
+    assert regle_evitee not in ids, f"{regle_evitee} accuse du mDNS"

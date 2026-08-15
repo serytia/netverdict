@@ -32,7 +32,16 @@ while getopts "d:o:i:p:s:" opt; do
     o) OUTDIR="$OPTARG" ;;
     i) TARGET_IP="$OPTARG" ;;
     p) TARGET_PORT="$OPTARG" ;;
-    s) SNAPLEN="$OPTARG" ;;
+    s) SNAPLEN="$OPTARG"
+       # Valide TOUT DE SUITE : une valeur non numerique tue tcpdump a
+       # l'instant zero, et le script annoncait quand meme « Bundle pret »
+       # avec le chemin d'un pcap qui n'existait pas.
+       case "$SNAPLEN" in
+         ''|*[!0-9]*) echo "-s attend un nombre d'octets, recu: $SNAPLEN" >&2
+                      exit 2 ;;
+       esac
+       [ "$SNAPLEN" -lt 64 ] && { echo "-s $SNAPLEN est trop petit pour lire un en-tete TCP (minimum 64)" >&2; exit 2; }
+       ;;
     *) echo "usage: $0 [-d sec] [-o dir] [-i ip] [-p port] [-s snaplen]" >&2; exit 2 ;;
   esac
 done

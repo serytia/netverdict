@@ -151,6 +151,23 @@ class Clause:
         results = (c.eval(sig) for c in self.children)
         return all(results) if self.mode == "all" else any(results)
 
+    def valider(self, sig: dict) -> None:
+        """Evalue TOUTES les conditions, sans court-circuit, pour le dry-run.
+
+        `eval` s'arrete des la premiere condition fausse d'un `all` - c'est le
+        comportement voulu a l'analyse, mais il rendait le controle de
+        chargement partiel : une faute de frappe placee apres une condition
+        fausse n'etait jamais atteinte, donc jamais signalee. La moitie des
+        conditions des regles livrees n'etaient ainsi jamais eprouvees, et une
+        regle utilisateur pouvait contenir un champ inexistant sans que
+        `--rules` ne dise rien (revue du 15/08/2026).
+        """
+        for c in self.children:
+            if isinstance(c, Clause):
+                c.valider(sig)
+            else:
+                c.eval(sig)
+
 
 class _EvidenceFormatter(string.Formatter):
     """Interpole les signaux dans les preuves en tolerant les None :
@@ -320,9 +337,12 @@ def _load(base: list[Path], extra_files: Optional[list[str | Path]],
                 raise RuleError(f"Id de regle duplique: {r.id!r} (dans {f.name})")
             seen_ids.add(r.id)
             try:
-                r.when.eval(probe)
+                # `valider` et non `eval` : sans court-circuit, sinon la
+                # moitie des conditions ne sont jamais eprouvees (voir
+                # Clause.valider).
+                r.when.valider(probe)
                 if r.unless is not None:
-                    r.unless.eval(probe)
+                    r.unless.valider(probe)
                 # TOUTES les langues sont eprouvees, pas seulement le
                 # francais : une accolade fautive dans une traduction doit
                 # exploser au chargement comme n'importe quelle autre faute de

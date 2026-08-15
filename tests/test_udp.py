@@ -219,8 +219,17 @@ def test_un_icmp_concernant_de_l_udp_ne_va_pas_aux_flux_tcp(tmp_path):
     flux = build_flows(cap)
     assert len(flux) == 1
     assert flux[0].icmp == [], "l'erreur UDP a ete rattachee a un flux TCP"
-    conv = build_udp_conversations(cap)
-    assert conv == [] or conv[0].icmp, "l'erreur UDP doit rester disponible"
+    # La capture ne contient AUCUN datagramme UDP : il n'y a donc pas de
+    # conversation a laquelle rattacher l'erreur. L'ancienne assertion
+    # (`conv == [] or ...`) etait vraie par construction et ne prouvait rien.
+    # Ce qui compte est verifie plus haut : le flux TCP ne l'a pas prise.
+    assert build_udp_conversations(cap) == []
+    # Et le pendant : la MEME erreur, avec cette fois la conversation UDP
+    # correspondante, doit bien lui etre rattachee.
+    cap2 = capture(tmp_path, [udp(0.0, CLIENT, SERVEUR, 40000, 1812),
+                              icmp_pour_udp(0.02, 3)], nom="avec-udp.pcap")
+    conv2 = build_udp_conversations(cap2)
+    assert len(conv2) == 1 and len(conv2[0].icmp) == 1
 
 
 def test_le_compte_de_paquets_boucle_avec_de_l_udp(tmp_path):
@@ -232,3 +241,60 @@ def test_le_compte_de_paquets_boucle_avec_de_l_udp(tmp_path):
     st = cap.stats
     assert st.total == (st.tcp + st.udp + st.icmp + st.other_ip + st.non_ip
                         + st.fragments_skipped + st.parse_errors)
+
+
+# ---------------------------------------------- verrous poses par la revue
+
+def test_un_icmp_emis_par_le_CLIENT_n_accuse_pas_le_serveur(tmp_path, udp_rules):
+    """Le rattachement enregistrait les DEUX sens du quadruplet. Un ICMP
+    port-unreachable emis par le CLIENT - a propos d'une reponse arrivee apres
+    la fermeture de son socket, ce qui est banal - declenchait « rien n'ecoute
+    sur ce port » CONTRE LE SERVEUR, confiance haute. L'outil accusait la
+    machine qui avait correctement repondu (revue du 15/08/2026)."""
+    orig_u = dpkt.udp.UDP(sport=1812, dport=40000)   # le paquet fautif est la
+    orig_u.data = b"\x01" * 20                       # REPONSE du serveur
+    orig_u.ulen = 28
+    orig_ip = _ip(SERVEUR, CLIENT, dpkt.ip.IP_PROTO_UDP, orig_u, 42)
+    ic = dpkt.icmp.ICMP(type=3, code=3)
+    ic.data = dpkt.icmp.ICMP.Unreach(data=orig_ip)
+    trames = [
+        udp(0.0, CLIENT, SERVEUR, 40000, 1812),
+        udp(0.1, SERVEUR, CLIENT, 1812, 40000),
+        (0.2, _eth(_ip(CLIENT, SERVEUR, dpkt.ip.IP_PROTO_ICMP, ic, 43))),
+    ]
+    vs = verdicts(tmp_path, trames, udp_rules)
+    assert vs[0].signals.icmp_port_unreachable is False, (
+        "l'ICMP du client a ete retenu contre le serveur")
+    ids = [m.rule.id for m in vs[0].matches]
+    assert "udp-port-unreachable" not in ids
+
+
+def test_une_reponse_ANTERIEURE_a_la_question_ne_vaut_pas_reponse(tmp_path,
+                                                                  udp_rules):
+    """`answered = bool(s2c)` comptait n'importe quel datagramme serveur, meme
+    anterieur a la question : une conversation totalement sans reponse passait
+    pour un « echange bidirectionnel sans erreur »."""
+    trames = [
+        udp(0.0, SERVEUR, CLIENT, 123, 40000, ident=1),   # reste d'avant
+        udp(5.0, CLIENT, SERVEUR, 40000, 123, ident=2),   # la question
+        udp(7.0, CLIENT, SERVEUR, 40000, 123, ident=3),   # reemise, en vain
+    ]
+    vs = verdicts(tmp_path, trames, udp_rules)
+    assert vs[0].signals.answered is False
+    ids = [m.rule.id for m in vs[0].matches]
+    assert "udp-exchange-ok" not in ids, "un flux muet a ete declare sain"
+
+
+def test_un_icmp_non_reconnu_ne_fait_plus_taire_l_etage(tmp_path, udp_rules):
+    """Une erreur ICMP hors des trois categories connues (ici host-unreachable,
+    type 3 code 1) ne declenchait aucun verdict ET armait le garde
+    `icmp_count == 0` : RECEVOIR une preuve rendait MOINS de verdict que ne
+    rien recevoir, et le code retour repassait a 0."""
+    trames = [udp(i * 2.0, CLIENT, SERVEUR, 40000, 123, ident=i)
+              for i in range(3)]
+    trames.append(icmp_pour_udp(6.5, 1, dport=123))     # code 1 = host unreach
+    vs = verdicts(tmp_path, trames, udp_rules)
+    assert vs[0].signals.icmp_other is True
+    assert vs[0].primary is not None, "l'etage s'est taci malgre une erreur ICMP"
+    assert vs[0].primary.rule.id == "udp-icmp-non-interprete"
+    assert "type 3 code 1" in vs[0].primary.evidence[0]

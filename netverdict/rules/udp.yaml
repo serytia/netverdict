@@ -35,8 +35,13 @@ rules:
     title: "Rien n'ecoute sur ce port UDP"
     when:
       all:
+        # PAS de garde `dns_handled` ici, contrairement aux regles de silence :
+        # un ICMP est un FAIT observe, et il reste vrai que la conversation
+        # soit du DNS ou non. Avec la garde, un resolveur dont le port 53
+        # etait ferme produisait un ICMP parfaitement visible dans la capture
+        # pendant que dns-no-answer affirmait « un DROP, pas un REJECT
+        # (sinon un ICMP serait visible) » (revue du 15/08/2026).
         - "icmp_port_unreachable == true"
-        - "dns_handled == false"
     evidence:
       - "ICMP port-unreachable emis par {icmp_from} pour {client}:{cport} -> {server}:{sport}"
       - "{pkts_c2s} datagramme(s) envoye(s), {pkts_s2c} recu(s)"
@@ -71,8 +76,8 @@ rules:
     title: "Trafic UDP REFUSE explicitement par un equipement"
     when:
       all:
+        # Voir udp-port-unreachable : un ICMP n'est jamais etouffe.
         - "icmp_admin_prohibited == true"
-        - "dns_handled == false"
     evidence:
       - "ICMP administratively-prohibited emis par {icmp_from} pour {client}:{cport} -> {server}:{sport}"
     remediation: |
@@ -101,8 +106,8 @@ rules:
     title: "Datagramme UDP trop grand pour le chemin (fragmentation requise)"
     when:
       all:
+        # Voir udp-port-unreachable : un ICMP n'est jamais etouffe.
         - "icmp_frag_needed == true"
-        - "dns_handled == false"
     evidence:
       - "ICMP fragmentation-needed emis par {icmp_from} pour {client}:{cport} -> {server}:{sport}"
       - "{bytes_c2s} octets envoyes par le client"
@@ -126,6 +131,49 @@ rules:
       application emitting large datagrams unknowingly (DNS with EDNS0 at
       4096, VXLAN, RADIUS with large attributes).
 
+  - id: udp-icmp-non-interprete
+    scope: udp
+    verdict: AMBIGU
+    priority: 60
+    confidence: moyenne
+    title: "Erreur ICMP recue sur ce flux UDP, mais non interpretee"
+    when:
+      all:
+        - "icmp_other == true"
+        - "icmp_port_unreachable == false"
+        - "icmp_admin_prohibited == false"
+        - "icmp_frag_needed == false"
+    evidence:
+      - "ICMP {icmp_other_label} emis par {icmp_from} pour {client}:{cport} -> {server}:{sport}"
+      - "{pkts_c2s} datagramme(s) envoye(s), {pkts_s2c} recu(s)"
+    remediation: |
+      Le reseau a renvoye une erreur que netverdict ne sait pas classer :
+      elle n'est ni « port ferme », ni « refus administratif », ni
+      « fragmentation requise ». Le rapport la signale plutot que de
+      l'ignorer - sans cette regle, RECEVOIR une erreur produisait MOINS de
+      verdict que ne rien recevoir du tout.
+      Les cas les plus frequents derriere un type/code inattendu :
+      - type 3 code 0 ou 1 (network/host unreachable) : le routage ne mene
+        pas jusqu'a {server}, cherchez cote table de routage ou passerelle ;
+      - type 11 (TTL exceeded) : boucle de routage, ou traceroute en cours ;
+      - type 3 code 2 (protocol unreachable) : la pile distante refuse UDP.
+      Lire l'erreur telle quelle dans la capture : `tcpdump -r <fichier> icmp`.
+    title_en: "ICMP error received on this UDP flow, but not interpreted"
+    evidence_en:
+      - "ICMP {icmp_other_label} sent by {icmp_from} for {client}:{cport} -> {server}:{sport}"
+      - "{pkts_c2s} datagram(s) sent, {pkts_s2c} received"
+    remediation_en: |
+      The network returned an error netverdict cannot classify: it is neither
+      "port closed", nor "administrative refusal", nor "fragmentation
+      needed". The report names it rather than ignoring it - without this
+      rule, RECEIVING an error produced FEWER verdicts than receiving nothing.
+      The most frequent cases behind an unexpected type/code:
+      - type 3 code 0 or 1 (network/host unreachable): routing does not reach
+        {server}; look at the routing table or the gateway;
+      - type 11 (TTL exceeded): routing loop, or a traceroute in flight;
+      - type 3 code 2 (protocol unreachable): the remote stack refuses UDP.
+      Read the error as-is: `tcpdump -r <file> icmp`.
+
   # ------------------------------------------------------------- le silence
   - id: udp-known-service-silent
     scope: udp
@@ -136,7 +184,15 @@ rules:
     when:
       all:
         - "answered == false"
-        - "icmp_count == 0"
+        # Aucune erreur ICMP RECONNUE : les trois regles ci-dessus la
+        # traiteraient mieux. Un ICMP non interprete est desormais couvert par
+        # udp-icmp-non-interprete, donc le garde n'a plus besoin de porter sur
+        # icmp_count - qui faisait taire cette regle sans qu'aucune autre ne
+        # prenne le relais (revue du 15/08/2026).
+        - "icmp_port_unreachable == false"
+        - "icmp_admin_prohibited == false"
+        - "icmp_frag_needed == false"
+        - "icmp_other == false"
         - "dns_handled == false"
         # LE garde-fou de cet etage. Seuls les ports dont on SAIT que le
         # serveur repond (NTP, SNMP, RADIUS, TFTP, IKE...) autorisent a dire
@@ -195,7 +251,7 @@ rules:
     when:
       all:
         - "answered == true"
-        - "icmp_count == 0"
+        - "icmp_count == 0"      # la moindre erreur ICMP interdit « sans erreur »
         - "dns_handled == false"
     evidence:
       - "{pkts_c2s} datagramme(s) envoye(s), {pkts_s2c} recu(s), premiere reponse en {first_response_ms:.0f} ms"
