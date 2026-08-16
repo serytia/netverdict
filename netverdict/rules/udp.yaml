@@ -1,0 +1,268 @@
+# Regles de verdict sur les CONVERSATIONS UDP (hors DNS, qui a les siennes).
+#
+# Principe qui gouverne tout ce fichier : en UDP, ce qui porte un verdict fort
+# est un ACTE, jamais une ABSENCE.
+#
+#   - un ICMP « port unreachable » est un acte : la machine a repondu, et elle
+#     a dit que rien n'ecoutait. C'est l'equivalent exact du RST au SYN.
+#   - un ICMP « administratively prohibited » est un acte : un equipement se
+#     nomme et annonce qu'il filtre.
+#   - l'absence de reponse n'est RIEN. syslog, NetFlow, StatsD, les traps SNMP
+#     emettent en aveugle par conception. Un verdict « le service ne repond
+#     pas » sur un flux syslog serait un faux positif affirmatif - exactement
+#     ce que les durcissements du 08/08 ont chasse du cote TCP.
+#
+# Consequence : une seule regle traite le silence, et elle ne s'applique
+# QU'AUX ports dont on sait que le serveur repond (NTP, SNMP, RADIUS...).
+# Partout ailleurs, netverdict se tait. Mesure du 15/08 qui l'impose : la
+# premiere version accusait tout port inconnu, et cinq datagrammes syslog
+# suffisaient a produire un panneau et a faire passer le code retour a 1 -
+# sur a peu pres n'importe quelle capture de serveur.
+# Meme la, le verdict reste AMBIGU : un service peut recevoir et IGNORER
+# (secret RADIUS inconnu, mauvaise communaute SNMP), ce qui est indiscernable
+# d'un DROP vu du client.
+#
+# Toutes portent `scope: udp` (contrat UdpSignals).
+
+rules:
+
+  # ------------------------------------------------------- actes du reseau
+  - id: udp-port-unreachable
+    scope: udp
+    verdict: APP
+    priority: 92
+    confidence: haute
+    title: "Rien n'ecoute sur ce port UDP"
+    when:
+      all:
+        # PAS de garde `dns_handled` ici, contrairement aux regles de silence :
+        # un ICMP est un FAIT observe, et il reste vrai que la conversation
+        # soit du DNS ou non. Avec la garde, un resolveur dont le port 53
+        # etait ferme produisait un ICMP parfaitement visible dans la capture
+        # pendant que dns-no-answer affirmait « un DROP, pas un REJECT
+        # (sinon un ICMP serait visible) » (revue du 15/08/2026).
+        - "icmp_port_unreachable == true"
+    evidence:
+      - "ICMP port-unreachable emis par {icmp_from} pour {client}:{cport} -> {server}:{sport}"
+      - "{pkts_c2s} datagramme(s) envoye(s), {pkts_s2c} recu(s)"
+    remediation: |
+      La machine {server} est joignable et son systeme a repondu lui-meme :
+      aucun processus n'est en ecoute sur le port {sport}/udp. Ce n'est ni le
+      reseau (le datagramme est arrive), ni un filtrage (un pare-feu qui
+      bloque se tait ou emet administratively-prohibited).
+      Chercher COTE SERVICE sur {server} :
+      - le service est-il demarre ? (`ss -lunp | grep :{sport}`)
+      - ecoute-t-il sur la bonne interface, ou seulement sur 127.0.0.1 ?
+      - a-t-il change de port lors d'une mise a jour de configuration ?
+    title_en: "Nothing is listening on this UDP port"
+    evidence_en:
+      - "ICMP port-unreachable sent by {icmp_from} for {client}:{cport} -> {server}:{sport}"
+      - "{pkts_c2s} datagram(s) sent, {pkts_s2c} received"
+    remediation_en: |
+      Host {server} is reachable and its own kernel answered: no process is
+      listening on port {sport}/udp. This is neither the network (the datagram
+      arrived) nor filtering (a blocking firewall stays silent or sends
+      administratively-prohibited).
+      Look at the SERVICE on {server}:
+      - is it running? (`ss -lunp | grep :{sport}`)
+      - is it bound to the right interface, or only to 127.0.0.1?
+      - did it change port during a configuration update?
+
+  - id: udp-reject-icmp
+    scope: udp
+    verdict: RESEAU
+    priority: 91
+    confidence: haute
+    title: "Trafic UDP REFUSE explicitement par un equipement"
+    when:
+      all:
+        # Voir udp-port-unreachable : un ICMP n'est jamais etouffe.
+        - "icmp_admin_prohibited == true"
+    evidence:
+      - "ICMP administratively-prohibited emis par {icmp_from} pour {client}:{cport} -> {server}:{sport}"
+    remediation: |
+      L'equipement {icmp_from} refuse ce trafic par politique. Ce n'est ni le
+      service ni le serveur : la regle de filtrage est sur CET equipement.
+      Y chercher la regle qui matche {client} -> {server}:{sport}/udp, et
+      verifier si le refus est voulu (durcissement recent ?) ou une regle trop
+      large. Contrairement a un DROP, ce refus est explicite : l'equipement se
+      nomme, la recherche est courte.
+    title_en: "UDP traffic explicitly REFUSED by a device"
+    evidence_en:
+      - "ICMP administratively-prohibited sent by {icmp_from} for {client}:{cport} -> {server}:{sport}"
+    remediation_en: |
+      Device {icmp_from} refuses this traffic by policy. This is neither the
+      service nor the server: the filtering rule lives on THAT device. Find
+      the rule matching {client} -> {server}:{sport}/udp there, and check
+      whether the refusal is intended (recent hardening?) or a rule that is
+      too broad. Unlike a DROP, this refusal is explicit: the device names
+      itself, so the search is short.
+
+  - id: udp-mtu-blackhole
+    scope: udp
+    verdict: RESEAU
+    priority: 90
+    confidence: haute
+    title: "Datagramme UDP trop grand pour le chemin (fragmentation requise)"
+    when:
+      all:
+        # Voir udp-port-unreachable : un ICMP n'est jamais etouffe.
+        - "icmp_frag_needed == true"
+    evidence:
+      - "ICMP fragmentation-needed emis par {icmp_from} pour {client}:{cport} -> {server}:{sport}"
+      - "{bytes_c2s} octets envoyes par le client"
+    remediation: |
+      Un equipement du chemin ({icmp_from}) ne peut pas transmettre des
+      datagrammes de cette taille. En UDP il n'y a pas de MSS a negocier :
+      c'est l'application qui choisit la taille, donc c'est elle qu'il faut
+      regler - ou le MTU du chemin qu'il faut corriger.
+      Cas classiques : un tunnel (VPN, GRE, PPPoE) qui reduit le MTU, et une
+      application qui emet de gros datagrammes sans le savoir (DNS avec
+      EDNS0 a 4096, VXLAN, RADIUS avec de gros attributs).
+    title_en: "UDP datagram too large for the path (fragmentation needed)"
+    evidence_en:
+      - "ICMP fragmentation-needed sent by {icmp_from} for {client}:{cport} -> {server}:{sport}"
+      - "{bytes_c2s} bytes sent by the client"
+    remediation_en: |
+      A device on the path ({icmp_from}) cannot forward datagrams of this
+      size. UDP has no MSS to negotiate: the application chooses the size, so
+      that is what must be tuned - or the path MTU that must be fixed.
+      Classic cases: a tunnel (VPN, GRE, PPPoE) reducing the MTU, and an
+      application emitting large datagrams unknowingly (DNS with EDNS0 at
+      4096, VXLAN, RADIUS with large attributes).
+
+  - id: udp-icmp-non-interprete
+    scope: udp
+    verdict: AMBIGU
+    priority: 60
+    confidence: moyenne
+    title: "Erreur ICMP recue sur ce flux UDP, mais non interpretee"
+    when:
+      all:
+        - "icmp_other == true"
+        - "icmp_port_unreachable == false"
+        - "icmp_admin_prohibited == false"
+        - "icmp_frag_needed == false"
+    evidence:
+      - "ICMP {icmp_other_label} emis par {icmp_from} pour {client}:{cport} -> {server}:{sport}"
+      - "{pkts_c2s} datagramme(s) envoye(s), {pkts_s2c} recu(s)"
+    remediation: |
+      Le reseau a renvoye une erreur que netverdict ne sait pas classer :
+      elle n'est ni « port ferme », ni « refus administratif », ni
+      « fragmentation requise ». Le rapport la signale plutot que de
+      l'ignorer - sans cette regle, RECEVOIR une erreur produisait MOINS de
+      verdict que ne rien recevoir du tout.
+      Les cas les plus frequents derriere un type/code inattendu :
+      - type 3 code 0 ou 1 (network/host unreachable) : le routage ne mene
+        pas jusqu'a {server}, cherchez cote table de routage ou passerelle ;
+      - type 11 (TTL exceeded) : boucle de routage, ou traceroute en cours ;
+      - type 3 code 2 (protocol unreachable) : la pile distante refuse UDP.
+      Lire l'erreur telle quelle dans la capture : `tcpdump -r <fichier> icmp`.
+    title_en: "ICMP error received on this UDP flow, but not interpreted"
+    evidence_en:
+      - "ICMP {icmp_other_label} sent by {icmp_from} for {client}:{cport} -> {server}:{sport}"
+      - "{pkts_c2s} datagram(s) sent, {pkts_s2c} received"
+    remediation_en: |
+      The network returned an error netverdict cannot classify: it is neither
+      "port closed", nor "administrative refusal", nor "fragmentation
+      needed". The report names it rather than ignoring it - without this
+      rule, RECEIVING an error produced FEWER verdicts than receiving nothing.
+      The most frequent cases behind an unexpected type/code:
+      - type 3 code 0 or 1 (network/host unreachable): routing does not reach
+        {server}; look at the routing table or the gateway;
+      - type 11 (TTL exceeded): routing loop, or a traceroute in flight;
+      - type 3 code 2 (protocol unreachable): the remote stack refuses UDP.
+      Read the error as-is: `tcpdump -r <file> icmp`.
+
+  # ------------------------------------------------------------- le silence
+  - id: udp-known-service-silent
+    scope: udp
+    verdict: AMBIGU
+    priority: 40
+    confidence: moyenne
+    title: "Un service UDP cense repondre reste muet"
+    when:
+      all:
+        - "answered == false"
+        # Aucune erreur ICMP RECONNUE : les trois regles ci-dessus la
+        # traiteraient mieux. Un ICMP non interprete est desormais couvert par
+        # udp-icmp-non-interprete, donc le garde n'a plus besoin de porter sur
+        # icmp_count - qui faisait taire cette regle sans qu'aucune autre ne
+        # prenne le relais (revue du 15/08/2026).
+        - "icmp_port_unreachable == false"
+        - "icmp_admin_prohibited == false"
+        - "icmp_frag_needed == false"
+        - "icmp_other == false"
+        - "dns_handled == false"
+        # LE garde-fou de cet etage. Seuls les ports dont on SAIT que le
+        # serveur repond (NTP, SNMP, RADIUS, TFTP, IKE...) autorisent a dire
+        # quelque chose d'un silence. Sur tout autre port, l'emission sans
+        # reponse est peut-etre le fonctionnement normal - syslog, NetFlow,
+        # StatsD emettent en aveugle - et accuser reviendrait a produire un
+        # panneau sur a peu pres toute capture de serveur.
+        - "expects_reply == true"
+        # Au moins deux datagrammes : un envoi unique peut n'etre qu'un
+        # keepalive, ou la capture qui s'arrete, et n'a rien a dire.
+        - "pkts_c2s >= 2"
+    evidence:
+      - "{pkts_c2s} datagrammes de {client} vers {server}:{sport} ({service_hint}), aucun retour en {duration_s:.1f} s"
+      - "aucune erreur ICMP : ni port ferme, ni filtrage explicite"
+    remediation: |
+      {service_hint} repond normalement a ses clients : ce silence total n'est
+      pas son fonctionnement habituel. Deux causes, et la capture ne permet
+      pas de les departager - d'ou AMBIGU plutot qu'une accusation :
+      1. DROP sur le chemin. Un pare-feu qui jette sans repondre produit
+         exactement ceci. Un service ARRETE, lui, aurait fait emettre un
+         ICMP port-unreachable par le systeme distant : son absence pointe
+         plutot vers le filtrage.
+      2. Le service recoit et IGNORE volontairement. C'est un comportement
+         courant et parfaitement silencieux : RADIUS ignore un client dont
+         le secret partage est inconnu, SNMP une mauvaise communaute, IKE une
+         proposition incompatible. Rien ne le distingue d'un DROP vu du
+         client.
+      Pour trancher : capturer COTE SERVEUR. Si les datagrammes y arrivent,
+      c'est le cas 2 et la reponse est dans les journaux du service.
+    title_en: "A UDP service that should answer stays silent"
+    evidence_en:
+      - "{pkts_c2s} datagrams from {client} to {server}:{sport} ({service_hint}), no reply in {duration_s:.1f} s"
+      - "no ICMP error: neither a closed port nor explicit filtering"
+    remediation_en: |
+      {service_hint} normally answers its clients: this total silence is not
+      its usual behaviour. Two causes, and the capture cannot separate them -
+      hence AMBIGUOUS rather than an accusation:
+      1. A DROP on the path. A firewall discarding without replying produces
+         exactly this. A STOPPED service would instead have made the remote
+         kernel emit an ICMP port-unreachable: its absence points to
+         filtering.
+      2. The service receives and deliberately IGNORES. This is common and
+         perfectly silent: RADIUS ignores a client whose shared secret is
+         unknown, SNMP a wrong community, IKE an incompatible proposal.
+         Nothing distinguishes it from a DROP as seen from the client.
+      To decide: capture ON THE SERVER. If the datagrams arrive there, it is
+      case 2 and the answer is in the service logs.
+
+  # ------------------------------------------------------- rien a signaler
+  - id: udp-exchange-ok
+    scope: udp
+    verdict: RAS
+    priority: 10
+    confidence: haute
+    title: "Echange UDP bidirectionnel sans erreur"
+    when:
+      all:
+        - "answered == true"
+        - "icmp_count == 0"      # la moindre erreur ICMP interdit « sans erreur »
+        - "dns_handled == false"
+    evidence:
+      - "{pkts_c2s} datagramme(s) envoye(s), {pkts_s2c} recu(s), premiere reponse en {first_response_ms:.0f} ms"
+    remediation: |
+      Le service repond. netverdict ne mesure pas la sante APPLICATIVE d'un
+      protocole UDP qu'il ne decode pas : un echange present et sans erreur
+      ICMP est tout ce que la capture permet d'affirmer ici.
+    title_en: "Two-way UDP exchange with no error"
+    evidence_en:
+      - "{pkts_c2s} datagram(s) sent, {pkts_s2c} received, first reply in {first_response_ms:.0f} ms"
+    remediation_en: |
+      The service answers. netverdict does not measure the APPLICATION health
+      of a UDP protocol it does not decode: an exchange present and free of
+      ICMP errors is all this capture allows to state.

@@ -31,6 +31,8 @@ RACINE_PAQUET = Path(netverdict.__file__).parent
     "capture/capture.sh",        # execute par cmd_capture ailleurs
     "capture/sysmon-netverdict.xml",   # referencee par le README et evtx.py
     "rules/builtin.yaml",        # chargee par load_rules a chaque analyse
+    "rules/dns.yaml",            # chargee par load_dns_rules a chaque analyse
+    "rules/udp.yaml",            # chargee par load_udp_rules a chaque analyse
 ])
 def test_les_ressources_executees_vivent_dans_le_paquet(relatif):
     chemin = RACINE_PAQUET / relatif
@@ -59,7 +61,8 @@ def test_chaque_ressource_est_declaree_livrable(recwarn):
     motifs = conf["tool"]["setuptools"]["package-data"]["netverdict"]
 
     for relatif in ("capture/capture.ps1", "capture/capture.sh",
-                    "capture/sysmon-netverdict.xml", "rules/builtin.yaml"):
+                    "capture/sysmon-netverdict.xml", "rules/builtin.yaml",
+                    "rules/dns.yaml", "rules/udp.yaml"):
         assert any(fnmatch.fnmatch(relatif, m) for m in motifs), (
             f"{relatif} est execute a l'exploitation mais aucun motif de "
             f"package-data ne le couvre : absent du wheel, donc casse a "

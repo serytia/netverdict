@@ -18,7 +18,7 @@ au meme moment), en extrait les signaux TCP qui ne mentent pas, et rend un
 ```
 $ netverdict analyze capture.pcapng --snapshot snapshot.json
 
-18 paquets lus - 18 TCP, 0 ICMP, 0 non-IP, 0 illisibles - 1 conversations
+18 paquets lus - 18 TCP, 0 UDP, 0 ICMP, 0 autres IP, 0 non-IP, 0 fragments, 0 illisibles - 1 conversations
 +---------  APP - 10.0.0.42:51006 -> 10.0.0.5:5432 [confiance haute] --------+
 | Reponse applicative lente, reception prouvee par ACK rapide                |
 |   * 3 echanges : ACK serveur en 5 ms mais reponse en 800 ms (p50), 0 perte |
@@ -188,6 +188,71 @@ et preferer `--full-packets` uniquement quand c'est necessaire et assume.
 L'option `--explain` n'envoie jamais le pcap : uniquement le rapport JSON
 (signaux et verdicts).
 
+## DNS : le temps que le TCP ne peut pas montrer
+
+Une resolution lente se produit **avant le SYN**. Elle echappe donc a tout ce
+que l'etage TCP sait mesurer - et c'est pourquoi, jusqu'a la 0.7, une capture
+ou l'utilisateur avait attendu 2,4 s donnait ceci :
+
+```
+13 paquets lus - 10 TCP, 0 ICMP, 0 non-IP, 0 illisibles
+[RAS] 1 conversation(s) au transport sain            # code retour 0
+```
+
+Le verdict TCP etait juste. Le silence ne l'etait pas : trois paquets avaient
+disparu du compte, et toute supervision branchee sur ce code retour lisait
+« rien d'anormal ».
+
+| Observe | Verdict |
+|---|---|
+| Questions repetees, aucune reponse | RESEAU (resolveur injoignable ou filtre) |
+| Reponse seulement apres reemission | RESEAU (perte sur le chemin DNS) |
+| Reponse en plus d'une seconde | RESEAU (le delai precede la connexion) |
+| SERVFAIL | APP (le resolveur echoue : amont, DNSSEC, zone cassee) |
+| REFUSED | RESEAU (ACL sur le resolveur) |
+| NXDOMAIN | APP (faute de frappe, suffixe de recherche, enregistrement absent) |
+| TC=1 sans repli TCP/53 | RESEAU (le pare-feu autorise UDP/53 et oublie TCP/53) |
+| Une question, pas de reponse, capture finie | AMBIGU (indecidable, et il le dit) |
+
+Les flux sont aussi NOMMES : une conversation TCP precedee de la resolution
+qui a produit son adresse porte ce nom, et - seulement si la resolution la
+precede immediatement - le temps qu'elle a coute.
+
+Le DNS transporte par **TCP/53** est decode lui aussi (prefixe de longueur sur
+2 octets, segments reassembles) : une reponse tronquee suivie d'un repli TCP
+reussi n'est plus prise pour un echec. Le mDNS (5353) est decode et compte,
+mais les regles qui accusent s'y abstiennent - une question multicast sans
+reponse, c'est le protocole qui fonctionne.
+
+Les regles vivent dans `netverdict/rules/dns.yaml`. Un fichier `--rules`
+personnel peut contenir les deux familles : chaque regle est routee par son
+champ `scope` (`flow` par defaut), donc une regle DNS ne sera jamais evaluee
+par accident contre un flux TCP.
+
+## UDP : ce qu'un datagramme permet de dire
+
+| Observe | Verdict |
+|---|---|
+| ICMP port-unreachable | APP (rien n'ecoute - le jumeau UDP du RST au SYN) |
+| ICMP administratively-prohibited | RESEAU (un equipement se nomme et filtre) |
+| ICMP fragmentation-needed | RESEAU (datagramme trop grand pour le chemin) |
+| Un service connu pour repondre reste muet | AMBIGU (DROP, ou service qui ignore) |
+| Echange bidirectionnel, aucun ICMP | RAS |
+| Tout le reste sans reponse | *rien* - voir ci-dessous |
+
+**Les verdicts UDP reposent sur l'ICMP, jamais sur le silence.** Un port ferme
+ou un REJECT explicite sont des ACTES ; l'absence de reponse n'est rien, parce
+que syslog, NetFlow, StatsD et les traps SNMP emettent en aveugle par
+conception. Seuls les ports dont on sait qu'ils repondent (NTP, SNMP, RADIUS,
+TFTP, IKE...) autorisent a dire quelque chose d'un silence - et meme la, le
+verdict reste AMBIGU : un service peut recevoir et ignorer volontairement
+(secret RADIUS inconnu, mauvaise communaute SNMP), ce qui est indiscernable
+d'un DROP vu du client.
+
+Avant la 0.8, un service UDP arrete (RADIUS, SNMP, un collecteur syslog) ne
+produisait aucun verdict et un code retour 0, alors que l'ICMP etait deja
+decode dans la capture : il n'etait rattache a rien.
+
 ## Comment ca marche
 
 Deux etages strictement separes, comme decodeurs/regles dans Wazuh :
@@ -219,11 +284,24 @@ un avec les extras installes, un sur le paquet construit.
 
 ## Statut de validation
 
-- **Valide** : 323 tests automatises, verts sur Linux, Windows et macOS
+- **Valide** : 462 tests automatises, verts sur Linux, Windows et macOS
   (Python 3.11 a 3.13) et sous fuseau decale.
 - **Valide au kernel** : 8 scenarios de panne reproduits par un vrai noyau
   Linux (netem, iptables, vraies sockets — `lab/`), plus la jointure auditd
   sur un journal auditd reel. Les pcaps produits servent de fixtures.
+- **DNS valide contre de vrais serveurs** : 9 scenarios de plus, repondus par
+  dnsmasq 2.91 et BIND 9.20 dans des namespaces (`lab/dns_scenario.sh`). Un
+  `netem delay 1500ms` est mesure a 1501 ms, y compris sur une capture prise
+  a `-s 96` ou les adresses sont illisibles. Cette confrontation a trouve un
+  defaut REEL — un repli TCP/53 simplement TENTE comptait comme reussi, ce
+  qui faisait taire le verdict dans le cas meme qu'il vise — et trois defauts
+  dans le banc d'essai lui-meme.
+- **UDP valide au kernel** : 5 scenarios (`lab/udp_scenario.sh`) ou les
+  erreurs ICMP sont emises par la pile Linux elle-meme. L'un d'eux est un
+  TEMOIN NEGATIF : un flux syslog a sens unique, sur lequel netverdict doit
+  rester MUET. Il a paye tout de suite — la premiere version de la regle
+  accusait tout port inconnu, et cinq datagrammes syslog suffisaient a lever
+  un panneau et a faire basculer le code retour.
 - **Valide sur incident reel** : chaine de capture Windows complete (pktmon
   -> analyse) contre un service lent, un port ferme et un port filtre — les
   trois verdicts exacts.
@@ -241,7 +319,17 @@ imagine ; l'execution reelle decrit celui qui existe.
 
 ## Limites connues (v1)
 
-- TCP/IPv4-IPv6 uniquement (pas d'UDP/QUIC, pas de reassemblage de fragments).
+- TCP, DNS et UDP (IPv4/IPv6). Pas de QUIC, pas de reassemblage de fragments.
+  La ligne de comptes BOUCLE toujours : ce qui n'est pas analyse se voit.
+- **DoH et DoT sont invisibles.** La resolution chiffree passe en TCP/443 ou
+  TCP/853 et ressemble a n'importe quelle connexion.
+- Les reponses DNS sont les premieres victimes d'un snaplen serre :
+  `tcpdump -s 96` laisse 54 octets de payload, assez pour l'en-tete et la
+  question, rarement pour les enregistrements de reponse. La latence, les
+  reemissions et les codes de retour restent JUSTES (ils vivent dans les 12
+  premiers octets) ; les adresses resolues non, donc les flux ne peuvent pas
+  etre nommes. Le rapport le DIT au lieu de deviner - capturer avec
+  `capture.sh -s 256` pour les obtenir.
 - RTT p95 pollue par les delayed ACK (~40-200 ms) : min et p50 sont fiables.
   Aucune regle ne rend donc un verdict RESEAU sur le seul p95. En revanche un
   p95 eleve n'est pas ignore : une mediane saine avec une queue significative

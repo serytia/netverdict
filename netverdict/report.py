@@ -142,7 +142,10 @@ def render_console(cap: Capture, verdicts: list[FlowVerdict],
                    snapshot: Optional[HostSnapshot] = None,
                    top: int = 10, console: Optional[Console] = None,
                    timeline: Optional[Timeline] = None,
-                   lang: str = DEFAULT_LANG) -> None:
+                   lang: str = DEFAULT_LANG,
+                   dns_verdicts: Optional[list] = None,
+                   dns_links: Optional[dict] = None,
+                   udp_verdicts: Optional[list] = None) -> None:
     con = console or Console()
     st = cap.stats
     # Suspects rattaches a chaque flux. Indexe par position dans `verdicts`,
@@ -155,7 +158,9 @@ def render_console(cap: Capture, verdicts: list[FlowVerdict],
 
     con.print()
     con.print(Text(t("report.header", lang, total=st.total, tcp=st.tcp,
-                     icmp=st.icmp, non_ip=st.non_ip, errors=st.parse_errors,
+                     udp=st.udp, icmp=st.icmp, other=st.other_ip,
+                     non_ip=st.non_ip, frags=st.fragments_skipped,
+                     errors=st.parse_errors,
                      flows=len(verdicts)), style="dim"))
     # Honnetete de la mesure : une capture largement illisible ou tronquee
     # doit se voir AVANT les verdicts qu'elle affaiblit.
@@ -163,11 +168,140 @@ def render_console(cap: Capture, verdicts: list[FlowVerdict],
         con.print(Text(t("report.warn_parse_errors", lang,
                          errors=st.parse_errors, total=st.total),
                        style="bold red"))
+    # Le DNS n'est pas une affaire de VOLUME : trois paquets peuvent porter
+    # les deux secondes que l'utilisateur a subies, au milieu de dix mille
+    # paquets TCP sains. Le seuil est donc "au moins un", pas un pourcentage.
+    if dns_verdicts is None:
+        # Appelant qui ne fait pas passer l'etage DNS : l'avertissement dit
+        # alors la stricte verite pour CET appel.
+        if st.udp_dns:
+            con.print(Text(t("report.warn_dns_not_analyzed", lang, dns=st.udp_dns),
+                           style="bold yellow"))
+    elif st.udp_dns and not dns_verdicts:
+        con.print(Text(t("report.warn_dns_no_resolution", lang, n=st.udp_dns),
+                       style="bold yellow"))
+    if st.dns_unreadable:
+        con.print(Text(t("report.warn_dns_unreadable", lang, n=st.dns_unreadable),
+                       style="bold yellow"))
     if st.unsupported_linktype:
         con.print(Text(t("report.warn_linktype", lang), style="bold red"))
     if st.mixed_linktypes:
         con.print(Text(t("report.warn_mixed_linktypes", lang),
                        style="bold red"))
+
+    # --- Resolutions DNS -----------------------------------------------
+    # Placees AVANT les conversations, parce qu'elles les precedent : quand un
+    # nom met deux secondes a se resoudre, la connexion qui suit peut etre
+    # parfaitement saine et l'utilisateur avoir attendu quand meme. Les lire
+    # apres reviendrait a lire l'histoire a l'envers.
+    dns_links = dns_links or {}
+    if dns_verdicts:
+        noms_vers_flux: dict[str, list[str]] = {}
+        for index, lien in dns_links.items():
+            if not lien.explains_delay or index >= len(verdicts):
+                continue
+            s = verdicts[index].signals
+            noms_vers_flux.setdefault(lien.qname, []).append(
+                f"{s.server}:{s.sport}")
+        dns_sains = 0
+        dns_muets = 0
+        coupees = 0
+        entete_posee = False
+        for dv in sorted(dns_verdicts, key=lambda d: d.signals.t_first):
+            ds = dv.signals
+            if ds.capture_truncated and not ds.answers_readable and ds.answered:
+                coupees += 1
+            # RAS et « aucune regle n'a matche » ne sont PAS la meme chose :
+            # le premier est un verdict rendu, le second un silence. Les
+            # confondre faisait annoncer « N resolutions saines » a propos de
+            # resolutions dont l'outil n'avait rien su dire (revue du 15/08).
+            if dv.primary is None:
+                dns_muets += 1
+                continue
+            if dv.verdict == "RAS":
+                dns_sains += 1
+                continue
+            if not entete_posee:
+                con.print()
+                con.print(Text(t("report.dns_header", lang), style="bold"))
+                entete_posee = True
+            m = dv.primary
+            style = VERDICT_STYLE.get(m.verdict, "bold")
+            body = Text()
+            body.append(f"{m.title}\n", style="bold")
+            for ev in m.evidence:
+                body.append(f"  * {ev}\n")
+            suivants = noms_vers_flux.get(ds.qname)
+            if suivants:
+                body.append(f"  * {t('report.dns_leads_to', lang)}"
+                            f"{', '.join(sorted(set(suivants)))}\n", style="cyan")
+            if m.remediation:
+                body.append(f"\n{t('report.fix_header', lang)}\n", style="bold")
+                for line in m.remediation.splitlines():
+                    body.append(f"  {line}\n")
+            title = Text()
+            title.append(f" {verdict_label(m.verdict, lang)} ", style=style)
+            title.append(f"— DNS {ds.qname} ({ds.qtype}) ")
+            title.append(f"[{conf_label(m.rule.confidence, lang)}]", style="dim")
+            con.print(Panel(body, title=title, border_style=style.split()[-1]))
+        if coupees:
+            con.print(Text(t("report.dns_answers_unreadable", lang, n=coupees),
+                           style="yellow"))
+        if dns_sains:
+            con.print(Text(t("report.dns_healthy", lang, n=dns_sains),
+                           style="dim"))
+        if dns_muets:
+            con.print(Text(t("report.dns_silent", lang, n=dns_muets),
+                           style="dim"))
+
+    # --- Conversations UDP ----------------------------------------------
+    # Apres le DNS et avant le TCP : ce sont des echanges de meme nature que
+    # les conversations TCP, mais l'etage est volontairement plus pauvre - un
+    # datagramme ne prouve ni la reception, ni le sens, ni la perte.
+    if udp_verdicts:
+        udp_sains = 0
+        udp_muets = 0
+        entete_posee = False
+        for uv in sorted(udp_verdicts, key=lambda u: u.signals.t_first):
+            us = uv.signals
+            # Voir la section DNS : un silence n'est pas une sante.
+            if uv.primary is None:
+                udp_muets += 1
+                continue
+            if uv.verdict == "RAS":
+                udp_sains += 1
+                continue
+            if not entete_posee:
+                con.print()
+                con.print(Text(t("report.udp_header", lang), style="bold"))
+                entete_posee = True
+            m = uv.primary
+            style = VERDICT_STYLE.get(m.verdict, "bold")
+            body = Text()
+            body.append(f"{m.title}\n", style="bold")
+            for ev in m.evidence:
+                body.append(f"  * {ev}\n")
+            if us.expects_reply:
+                body.append(f"  * {t('report.udp_unidirectional_hint', lang, sport=us.sport, service=us.service_hint)}\n",
+                            style="cyan")
+            if not us.direction_confident:
+                body.append(f"  * {t('report.udp_direction_unsure', lang)}\n",
+                            style="dim")
+            if m.remediation:
+                body.append(f"\n{t('report.fix_header', lang)}\n", style="bold")
+                for line in m.remediation.splitlines():
+                    body.append(f"  {line}\n")
+            title = Text()
+            title.append(f" {verdict_label(m.verdict, lang)} ", style=style)
+            title.append(f"— UDP {us.client}:{us.cport} -> {us.server}:{us.sport} ")
+            title.append(f"[{conf_label(m.rule.confidence, lang)}]", style="dim")
+            con.print(Panel(body, title=title, border_style=style.split()[-1]))
+        if udp_sains:
+            con.print(Text(t("report.udp_healthy", lang, n=udp_sains),
+                           style="dim"))
+        if udp_muets:
+            con.print(Text(t("report.udp_silent", lang, n=udp_muets),
+                           style="dim"))
 
     ordered = sorted(verdicts, key=_sort_key)
     shown = 0
@@ -203,6 +337,18 @@ def render_console(cap: Capture, verdicts: list[FlowVerdict],
         if attr:
             body.append(f"  * {t('report.process_retro', lang)}"
                         f"{attr.describe(lang)}\n", style="cyan")
+        # Le nom qui a produit cette connexion, et - seulement s'il la precede
+        # immediatement - le temps que sa resolution a coute. Un flux dont le
+        # transport est irreprochable peut avoir ete precede de deux secondes
+        # d'attente : c'est la seule ligne du rapport qui les rend visibles.
+        lien = dns_links.get(position_de.get(id(fv), -1))
+        if lien is not None:
+            if lien.explains_delay and lien.latency_ms:
+                body.append(f"  * {t('report.dns_before_flow', lang, ms=lien.latency_ms, qname=lien.qname)}\n",
+                            style="cyan")
+            else:
+                body.append(f"  * {t('report.dns_name_hint', lang, qname=lien.qname)}\n",
+                            style="cyan")
         if not s.direction_confident:
             body.append(f"  * {t('report.direction_unsure', lang)}\n",
                         style="dim")
@@ -275,7 +421,10 @@ def render_console(cap: Capture, verdicts: list[FlowVerdict],
 def to_json(cap: Capture, verdicts: list[FlowVerdict],
             snapshot: Optional[HostSnapshot] = None,
             timeline: Optional[Timeline] = None,
-            lang: str = DEFAULT_LANG) -> str:
+            lang: str = DEFAULT_LANG,
+            dns_verdicts: Optional[list] = None,
+            dns_links: Optional[dict] = None,
+            udp_verdicts: Optional[list] = None) -> str:
     """Rapport machine.
 
     Les CLES et les JETONS (verdict, confidence, side) ne suivent PAS la
@@ -288,12 +437,49 @@ def to_json(cap: Capture, verdicts: list[FlowVerdict],
     process_par_flux = attributions(verdicts, timeline)
     out = {
         "netverdict": 1,
-        "stats": {"packets": st.total, "tcp": st.tcp, "icmp": st.icmp,
-                  "non_ip": st.non_ip, "parse_errors": st.parse_errors,
+        "stats": {"packets": st.total, "tcp": st.tcp, "udp": st.udp,
+                  "udp_dns": st.udp_dns, "icmp": st.icmp,
+                  "other_ip": st.other_ip, "non_ip": st.non_ip,
+                  "fragments_skipped": st.fragments_skipped,
+                  "parse_errors": st.parse_errors,
+                  "dns_unreadable": st.dns_unreadable,
                   "linktype": st.linktype,
                   "mixed_linktypes": st.mixed_linktypes},
         "flows": [],
     }
+    if dns_verdicts is not None:
+        out["dns"] = [{
+            "qname": dv.signals.qname,
+            "qtype": dv.signals.qtype,
+            "verdict": dv.verdict if dv.primary else None,
+            "signals": dv.signals.as_dict(),
+            "matches": [{
+                "rule": m.rule.id,
+                "verdict": m.verdict,
+                "priority": m.rule.priority,
+                "confidence": m.rule.confidence,
+                "title": m.title,
+                "evidence": m.evidence,
+                "remediation": m.remediation,
+            } for m in dv.matches],
+        } for dv in dns_verdicts]
+    if udp_verdicts is not None:
+        out["udp"] = [{
+            "conversation": (f"{uv.signals.client}:{uv.signals.cport}"
+                             f"->{uv.signals.server}:{uv.signals.sport}"),
+            "verdict": uv.verdict if uv.primary else None,
+            "signals": uv.signals.as_dict(),
+            "matches": [{
+                "rule": m.rule.id,
+                "verdict": m.verdict,
+                "priority": m.rule.priority,
+                "confidence": m.rule.confidence,
+                "title": m.title,
+                "evidence": m.evidence,
+                "remediation": m.remediation,
+            } for m in uv.matches],
+        } for uv in udp_verdicts]
+    dns_links = dns_links or {}
     for index, fv in enumerate(verdicts):
         s = fv.signals
         entry = {
@@ -310,6 +496,15 @@ def to_json(cap: Capture, verdicts: list[FlowVerdict],
                 "remediation": m.remediation,
             } for m in fv.matches],
         }
+        lien = dns_links.get(index)
+        if lien is not None:
+            entry["dns"] = {
+                "qname": lien.qname,
+                "answered_at": lien.answered_at,
+                "resolution_ms": lien.latency_ms,
+                "lag_s": lien.lag_s,
+                "explains_delay": lien.explains_delay,
+            }
         if snapshot:
             ctx = snapshot.context_for(s)
             if ctx:

@@ -174,3 +174,112 @@ class TestCorrelateTable:
         assert suspects[0]["during_flow"] is False
         assert round(suspects[0]["delay_s"]) == 42
         assert "link down" in suspects[0]["message"]
+
+
+def test_une_attribution_hors_du_flux_annonce_la_tolerance_d_horloge():
+    """La tolerance d'horloge est appliquee symetriquement - une derive de
+    30 s entre deux machines est banale - si bien qu'un connect() POSTERIEUR
+    a la fin du flux peut etre retenu. C'est voulu, mais l'attribution repose
+    alors sur cette tolerance et non sur une concordance directe : le rapport
+    doit le dire (revue du 26/07/2026).
+    """
+    from netverdict.correlate import attribution_for
+    from netverdict.signals import FlowSignals
+    from netverdict.rules.engine import FlowVerdict
+    from netverdict.timeline import Timeline, TimelineEvent, ConnectionInfo
+
+    sig = FlowSignals(client="10.0.0.1", server="10.0.0.2", cport=5000,
+                      sport=443, t_first=100.0, duration_s=2.0)
+    fv = FlowVerdict(signals=sig)
+
+    def event(ts):
+        return TimelineEvent(
+            ts=ts, source="sysmon", host="h", category="service", severity=1,
+            ident="sysmon", message="connect", tz_known=True,
+            connection=ConnectionInfo(
+                src_ip="10.0.0.1", src_port=5000, dst_ip="10.0.0.2",
+                dst_port=443, protocol="tcp", image="app.exe", pid=1))
+
+    dedans = attribution_for(fv, Timeline(events=[event(101.0)]))
+    assert dedans is not None and dedans.within_flow is True
+    assert "tolerance" not in dedans.describe("fr")
+
+    # 40 s APRES la fin du flux : retenu, mais signale comme tel.
+    dehors = attribution_for(fv, Timeline(events=[event(142.0)]))
+    assert dehors is not None and dehors.within_flow is False
+    assert "tolerance" in dehors.describe("fr")
+
+    # Et quand les deux existent, celui qui tombe DANS le flux gagne.
+    les_deux = attribution_for(fv, Timeline(events=[event(142.0), event(101.0)]))
+    assert les_deux.within_flow is True
+
+
+def test_le_connect_qui_a_CREE_le_flux_est_bien_dans_le_flux():
+    """Regression introduite le 15/08 et trouvee en revue : `dans_le_flux`
+    comparait a `sig.t_first` tout court, alors qu'un connect() PRECEDE
+    toujours le paquet qu'il produit. L'attribution la plus banale qui soit -
+    le connect() journalise trois millisecondes avant le SYN - etait donc
+    declaree hors du flux, affichait un avertissement de derive d'horloge sans
+    raison, et passait DERRIERE au tri."""
+    from netverdict.correlate import attribution_for
+    from netverdict.signals import FlowSignals
+    from netverdict.rules.engine import FlowVerdict
+    from netverdict.timeline import Timeline, TimelineEvent, ConnectionInfo
+
+    sig = FlowSignals(client="10.0.0.1", server="10.0.0.2", cport=5000,
+                      sport=443, t_first=100.0, duration_s=2.0)
+    fv = FlowVerdict(signals=sig)
+
+    def ev(ts, pid, image):
+        return TimelineEvent(
+            ts=ts, source="sysmon", host="h", category="service", severity=1,
+            ident="sysmon", message="connect", tz_known=True,
+            connection=ConnectionInfo(
+                src_ip="10.0.0.1", src_port=5000, dst_ip="10.0.0.2",
+                dst_port=443, protocol="tcp", image=image, pid=pid))
+
+    # 3 ms AVANT le premier paquet : c'est le cas NORMAL.
+    a = attribution_for(fv, Timeline(events=[ev(99.997, 1, "app.exe")]))
+    assert a.within_flow is True
+    assert "tolerance" not in a.describe("fr")
+
+    # Et il doit BATTRE un evenement parasite tombant au milieu du flux.
+    deux = attribution_for(fv, Timeline(events=[ev(99.997, 1, "le-vrai.exe"),
+                                                ev(101.5, 2, "un-autre.exe")]))
+    assert deux.connection.pid == 1, "un parasite a battu le connect() du flux"
+
+
+def test_un_evenement_DANS_le_flux_prime_sur_un_plus_proche_mais_dehors():
+    """Verrou du terme `not dans_le_flux` du tri (correlate.py).
+
+    Le test precedent ne le prouvait pas : ses deux evenements tombaient tous
+    deux dans le flux, si bien que le tri par ecart suffisait a departager et
+    que retirer le terme laissait la suite verte (revue du 15/08/2026).
+    Il faut un evenement HORS du flux mais PLUS PROCHE de t_first que le bon.
+    """
+    from netverdict.correlate import attribution_for
+    from netverdict.signals import FlowSignals
+    from netverdict.rules.engine import FlowVerdict
+    from netverdict.timeline import Timeline, TimelineEvent, ConnectionInfo
+
+    # Flux de 100.0 a 102.0 ; marge causale = 1 s, donc « dans le flux » va
+    # de 99.0 a 102.0.
+    sig = FlowSignals(client="10.0.0.1", server="10.0.0.2", cport=5000,
+                      sport=443, t_first=100.0, duration_s=2.0)
+    fv = FlowVerdict(signals=sig)
+
+    def ev(ts, pid, image):
+        return TimelineEvent(
+            ts=ts, source="sysmon", host="h", category="service", severity=1,
+            ident="sysmon", message="connect", tz_known=True,
+            connection=ConnectionInfo(
+                src_ip="10.0.0.1", src_port=5000, dst_ip="10.0.0.2",
+                dst_port=443, protocol="tcp", image=image, pid=pid))
+
+    dehors_mais_proche = ev(98.5, 1, "parasite.exe")   # ecart 1.5, HORS flux
+    dedans_mais_loin = ev(102.0, 2, "le-vrai.exe")     # ecart 2.0, DANS le flux
+    a = attribution_for(fv, Timeline(events=[dehors_mais_proche,
+                                             dedans_mais_loin]))
+    assert a.connection.pid == 2, (
+        "un evenement hors du flux, mais plus proche, a ete prefere")
+    assert a.within_flow is True

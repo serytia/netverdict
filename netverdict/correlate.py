@@ -149,6 +149,14 @@ def suspects_for(fv: FlowVerdict, timeline: Timeline,
 # la marge couvre un pcap et des events venant de deux hotes.
 CLOCK_TOLERANCE_S = 60.0
 
+# Marge CAUSALE : de combien un connect() peut preceder le premier paquet du
+# flux sans qu'il faille invoquer une derive d'horloge. L'appel systeme
+# precede l'emission de quelques microsecondes, mais les journaux datent a la
+# milliseconde et une machine chargee peut retarder l'ecriture : une seconde
+# couvre largement, sans jamais atteindre les dizaines de secondes ou la
+# question devient « est-ce vraiment ce flux ? ».
+CAUSALITE_S = 1.0
+
 
 @dataclass
 class ProcessAttribution:
@@ -166,6 +174,14 @@ class ProcessAttribution:
     # quand la source ne donne que la destination (auditd connect()) : la
     # correspondance est alors plus faible et le rapport doit l'annoncer.
     exact: bool = True
+    # True quand l'evenement tombe DANS la duree du flux. False quand il n'est
+    # rattache que grace a la tolerance d'horloge : elle est appliquee
+    # symetriquement (les horloges de la capture et du journal derivent dans
+    # les deux sens), si bien qu'un connect() posterieur a la fin du flux peut
+    # etre retenu. C'est voulu - une derive de 30 s entre deux machines est
+    # banale - mais l'admin doit savoir que l'attribution repose sur cette
+    # tolerance et non sur une concordance directe (revue du 26/07/2026).
+    within_flow: bool = True
 
     @property
     def connection(self):
@@ -182,6 +198,8 @@ class ProcessAttribution:
             txt += t("correlate.attr_user", lang, user=c.user)
         if not self.exact:
             txt += t("correlate.attr_inexact", lang)
+        if not self.within_flow:
+            txt += t("correlate.attr_clock_tolerance", lang)
         if self.candidates > 1:
             txt += t("correlate.attr_candidates", lang, n=self.candidates)
         return txt
@@ -262,7 +280,7 @@ def attribution_for(fv: FlowVerdict, timeline: Timeline,
     """
     sig = fv.signals
     t_end = sig.t_first + max(0.0, sig.duration_s)
-    trouves: list[tuple[float, TimelineEvent, str, bool]] = []
+    trouves: list[tuple[float, TimelineEvent, str, bool, bool]] = []
 
     for e in timeline.events:
         c = e.connection
@@ -277,22 +295,33 @@ def attribution_for(fv: FlowVerdict, timeline: Timeline,
         if match is None:
             continue
         side, exact = match
-        trouves.append((abs(e.ts - sig.t_first), e, side, exact))
+        # La borne basse est ANTERIEURE au flux, et ce n'est pas un detail :
+        # un connect() PRECEDE toujours le paquet qu'il produit. Une premiere
+        # version comparait a `sig.t_first` tout court, si bien que
+        # l'attribution la plus banale qui soit - le connect() journalise
+        # trois millisecondes avant le SYN - etait declaree « hors du flux »,
+        # affichait un avertissement de derive d'horloge sans raison, et
+        # passait DERRIERE au tri : un evenement parasite tombant au milieu du
+        # flux battait le connect() qui l'avait cree. Revue du 15/08/2026.
+        dans_le_flux = (sig.t_first - CAUSALITE_S) <= e.ts <= t_end
+        trouves.append((abs(e.ts - sig.t_first), e, side, exact, dans_le_flux))
 
     if not trouves:
         return None
     # Une correspondance EXACTE prime toujours sur une partielle, quelle que
     # soit la proximite temporelle : si Sysmon et auditd alimentent la meme
-    # analyse, la source la plus precise gagne. A qualite egale, le plus
-    # proche du debut du flux.
-    trouves.sort(key=lambda t: (not t[3], t[0]))
-    _ecart, event, side, exact = trouves[0]
+    # analyse, la source la plus precise gagne. Puis un evenement tombant DANS
+    # la vie du flux prime sur un evenement rattache par la seule tolerance
+    # d'horloge. A qualite egale, le plus proche du debut du flux.
+    trouves.sort(key=lambda t: (not t[3], not t[4], t[0]))
+    _ecart, event, side, exact, dans_le_flux = trouves[0]
     # `candidates` ne compte que les correspondances de MEME qualite : melanger
     # les deux gonflerait l'avertissement d'ambiguite avec des events qu'on
     # n'aurait de toute facon pas retenus.
     meme_qualite = sum(1 for t in trouves if t[3] == exact)
     return ProcessAttribution(event=event, side=side,
-                              candidates=meme_qualite, exact=exact)
+                              candidates=meme_qualite, exact=exact,
+                              within_flow=dans_le_flux)
 
 
 def attributions(verdicts: list[FlowVerdict],

@@ -28,7 +28,7 @@ par ts croissant ; l'ordre d'ecriture est volontairement melange) :
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from netverdict.sources.syslog import parse, _rfc3164_epoch
@@ -57,8 +57,21 @@ _EPOCH_2026_07_24_00Z = 1_784_851_200
 _EXPECTED_TS_L4 = _EPOCH_2026_07_24_00Z + 12 * 3600 + 2 * 60 + 11 + 0.532
 
 
+# ANCRE FIXE, et c'est indispensable : les lignes RFC3164 de la fixture ne
+# portent pas d'annee, donc le parseur les date par rapport a `now`. Sans
+# ancre, `now` valait l'horloge REELLE de la machine et les epochs attendus
+# ci-dessus (codes en 2026) devenaient faux a partir du ~25 juillet 2027 : la
+# suite serait passee au rouge toute seule, un an apres, sur une machine ou
+# rien n'avait change. Defaut trouve a la revue du 26/07/2026, ferme ici.
+#
+# Choisie a la fin de la journee couverte par la fixture (dont la ligne la
+# plus tardive est a 14h02 locales) : les lignes tombent toutes AVANT l'ancre,
+# donc aucune ne declenche le recul d'un an de _FUTURE_SLACK.
+ANCRE = datetime(2026, 7, 24, 23, 0, 0, tzinfo=timezone.utc)
+
+
 def _parsed():
-    return parse(FIXTURE)
+    return parse(FIXTURE, now=ANCRE)
 
 
 def _by_ident(events, ident):
@@ -210,3 +223,26 @@ def test_rfc3164_pas_de_bascule_si_dans_la_marge_de_26h():
     # seuil de 26h, donc PAS de recul (log de la nuit qui vient d'arriver).
     ts = _rfc3164_epoch("Jan 1 23:00:00", now=now)
     assert datetime.fromtimestamp(ts).year == 2027
+
+
+def test_la_suite_ne_depend_plus_de_l_horloge_de_la_machine(monkeypatch):
+    """Le temoin de la bombe calendaire.
+
+    On avance l'horloge du module de deux ans et on verifie que les epochs
+    produits ne bougent pas d'une microseconde. Sans l'ancre, ce test tombe :
+    les lignes RFC3164 seraient datees 2028 et tous les epochs attendus
+    seraient faux - exactement ce qui serait arrive tout seul apres le
+    ~25 juillet 2027, sur une machine ou rien n'avait change.
+    """
+    from netverdict.sources import syslog as module
+
+    avant = {e.ident: e.ts for e in _parsed()[0]}
+
+    class HorlogeFolle(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2028, 12, 31, 23, 59, tzinfo=tz)
+
+    monkeypatch.setattr(module, "datetime", HorlogeFolle)
+    apres = {e.ident: e.ts for e in _parsed()[0]}
+    assert apres == avant

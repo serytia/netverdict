@@ -18,14 +18,31 @@ DURATION=60
 OUTDIR=""
 TARGET_IP=""
 TARGET_PORT=""
+# 96 octets : de quoi lire IP + TCP + options, et l'en-tete DNS avec sa
+# question. Les REPONSES DNS (nom -> adresse) tiennent rarement dedans : sans
+# elles, netverdict mesure encore la latence et les codes de retour, mais ne
+# peut plus nommer les connexions qui ont suivi - il le dit dans le rapport
+# plutot que de le deviner. Monter a 128-256 les rend lisibles, au prix de
+# capturer davantage de payload (voir l'avertissement ci-dessus).
+SNAPLEN=96
 
-while getopts "d:o:i:p:" opt; do
+while getopts "d:o:i:p:s:" opt; do
   case "$opt" in
     d) DURATION="$OPTARG" ;;
     o) OUTDIR="$OPTARG" ;;
     i) TARGET_IP="$OPTARG" ;;
     p) TARGET_PORT="$OPTARG" ;;
-    *) echo "usage: $0 [-d sec] [-o dir] [-i ip] [-p port]" >&2; exit 2 ;;
+    s) SNAPLEN="$OPTARG"
+       # Valide TOUT DE SUITE : une valeur non numerique tue tcpdump a
+       # l'instant zero, et le script annoncait quand meme « Bundle pret »
+       # avec le chemin d'un pcap qui n'existait pas.
+       case "$SNAPLEN" in
+         ''|*[!0-9]*) echo "-s attend un nombre d'octets, recu: $SNAPLEN" >&2
+                      exit 2 ;;
+       esac
+       [ "$SNAPLEN" -lt 64 ] && { echo "-s $SNAPLEN est trop petit pour lire un en-tete TCP (minimum 64)" >&2; exit 2; }
+       ;;
+    *) echo "usage: $0 [-d sec] [-o dir] [-i ip] [-p port] [-s snaplen]" >&2; exit 2 ;;
   esac
 done
 
@@ -49,9 +66,22 @@ SNAP="$OUTDIR/snapshot.json"
 FILTER="tcp or icmp"
 [ -n "$TARGET_IP" ] && FILTER="($FILTER) and host $TARGET_IP"
 [ -n "$TARGET_PORT" ] && FILTER="($FILTER) and port $TARGET_PORT"
+# Le DNS fait partie de la question posee. Une resolution lente ou en echec se
+# produit AVANT le SYN : sans ces datagrammes, la capture montre une connexion
+# parfaitement saine et netverdict n'a aucun moyen d'expliquer les secondes que
+# l'utilisateur a subies. Le filtre les excluait jusqu'au 15/08/2026.
+#
+# AJOUTE HORS du ciblage, et c'est delibere : `-i 10.0.0.5` ou `-p 443`
+# ecarteraient sinon les echanges avec le RESOLVEUR, qui n'est ni l'hote cible
+# ni sur le port cible - la resolution du nom vise est precisement ce qu'on
+# veut voir. Le DNS est peu volumineux, le surcout est negligeable.
+#
+# Port 53 seulement : DoH et DoT (443, 853) sont chiffres ; les capturer
+# n'apprendrait rien que le filtre TCP ne prenne deja.
+FILTER="($FILTER) or (udp port 53)"
 
-echo "Capture tcpdump ${DURATION}s -> $PCAP  (filtre: $FILTER)"
-tcpdump -i any -s 96 -w "$PCAP" $FILTER &
+echo "Capture tcpdump ${DURATION}s -> $PCAP  (filtre: $FILTER, snaplen: $SNAPLEN)"
+tcpdump -i any -s "$SNAPLEN" -w "$PCAP" $FILTER &
 TCPDUMP_PID=$!
 # Sans ce trap, une sortie anticipee (erreur du snapshot, Ctrl-C) laissait
 # tcpdump orphelin en train d'ecrire indefiniment dans le fichier.

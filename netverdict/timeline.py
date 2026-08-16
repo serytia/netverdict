@@ -21,7 +21,30 @@ from typing import Iterable, Optional
 # contenir des sequences ANSI qui reecrivent le rapport a l'ecran (effacer
 # les verdicts au-dessus, falsifier des lignes). Neutralise A L'EMISSION,
 # dans le contrat : toute source presente et future est couverte.
-_CTRL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+#
+# Les controles BIDI Unicode sont couverts pour la meme raison, et elle est
+# plus vicieuse : U+202E (RIGHT-TO-LEFT OVERRIDE) n'efface rien, il INVERSE
+# l'affichage du texte qui suit. Un nom de service ou un chemin de binaire
+# choisi par un tiers peut donc se lire a l'envers dans le rapport -
+# "gpj.exe" pour "exe.jpg" est le cas d'ecole. Le lecteur n'a aucun moyen de
+# s'en apercevoir : le caractere est invisible. Trouve a la revue du 26/07,
+# ferme ici, et applique des l'origine aux noms DNS - qui viennent, eux, de
+# paquets bruts que n'importe qui sur le chemin peut fabriquer.
+#
+# Ecrits en ECHAPPEMENTS (\uXXXX) et jamais en litteral. Ce commentaire etait
+# la AVANT que ce soit vrai : la premiere version collait les caracteres
+# eux-memes, si bien que le fichier de la protection anti-bidi etait lui-meme
+# un fichier « Trojan Source » - rendu a l'envers par tout editeur appliquant
+# l'algorithme bidi, et signale par la banniere d'avertissement de GitHub. Le
+# defaut se cachait litteralement dans son propre correctif (revue du 15/08).
+# Un test parcourt desormais tout le depot pour que cela ne revienne pas.
+_CTRL_RE = re.compile(
+    "[\x00-\x1f\x7f-\x9f"
+    "\u200e\u200f"      # LEFT-TO-RIGHT / RIGHT-TO-LEFT MARK
+    "\u202a-\u202e"     # EMBEDDING / POP / OVERRIDE
+    "\u2066-\u2069"     # ISOLATE : LRI, RLI, FSI, PDI
+    "]"
+)
 _MAX_TEXT = 300
 
 

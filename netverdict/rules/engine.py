@@ -32,10 +32,21 @@ from typing import Any, Optional
 
 import yaml
 
+from ..dns import DnsSignals
 from ..i18n import DEFAULT_LANG, LANGS
 from ..signals import FlowSignals
+from ..udp import UdpSignals
 
 VERDICTS = {"RESEAU", "APP", "OS", "HOTE", "AMBIGU", "RAS"}
+
+# Une regle s'evalue contre UN contrat de signaux. `flow` = FlowSignals (une
+# conversation TCP), `dns` = DnsSignals (une resolution de nom). Le champ
+# existe pour que le fichier `--rules` d'un utilisateur puisse contenir les
+# deux : sans lui, une regle DNS serait sondee contre FlowSignals et
+# exploserait au chargement sur « Champ inconnu: latency_ms » - message vrai
+# mais incomprehensible pour qui vient d'ecrire une regle DNS parfaitement
+# valide.
+SCOPES = {"flow", "dns", "udp"}
 
 _OPS = {
     "==": lambda a, b: a == b,
@@ -140,6 +151,23 @@ class Clause:
         results = (c.eval(sig) for c in self.children)
         return all(results) if self.mode == "all" else any(results)
 
+    def valider(self, sig: dict) -> None:
+        """Evalue TOUTES les conditions, sans court-circuit, pour le dry-run.
+
+        `eval` s'arrete des la premiere condition fausse d'un `all` - c'est le
+        comportement voulu a l'analyse, mais il rendait le controle de
+        chargement partiel : une faute de frappe placee apres une condition
+        fausse n'etait jamais atteinte, donc jamais signalee. La moitie des
+        conditions des regles livrees n'etaient ainsi jamais eprouvees, et une
+        regle utilisateur pouvait contenir un champ inexistant sans que
+        `--rules` ne dise rien (revue du 15/08/2026).
+        """
+        for c in self.children:
+            if isinstance(c, Clause):
+                c.valider(sig)
+            else:
+                c.eval(sig)
+
 
 class _EvidenceFormatter(string.Formatter):
     """Interpole les signaux dans les preuves en tolerant les None :
@@ -169,6 +197,7 @@ class Rule:
     unless: Optional[Clause]
     evidence: list[str]
     remediation: str
+    scope: str = "flow"
     # Traductions, par code de langue. Le francais reste dans les champs
     # ci-dessus (compatibilite : tout code existant lit `rule.title`).
     title_i18n: dict[str, str] = field(default_factory=dict)
@@ -183,6 +212,10 @@ class Rule:
         if d["verdict"] not in VERDICTS:
             raise RuleError(f"Regle {d['id']!r}: verdict {d['verdict']!r} inconnu "
                             f"(attendu: {sorted(VERDICTS)})")
+        scope = d.get("scope", "flow")
+        if scope not in SCOPES:
+            raise RuleError(f"Regle {d['id']!r}: scope {scope!r} inconnu "
+                            f"(attendu: {sorted(SCOPES)})")
         # Champs freres `<champ>_<lang>` pour toute langue connue autre que le
         # francais, qui est porte par le champ nu. Une regle utilisateur qui
         # n'en fournit aucun reste parfaitement valide : elle sortira en
@@ -208,6 +241,7 @@ class Rule:
                 remedes[lang] = str(d[f"remediation_{lang}"]).strip()
         return cls(
             id=d["id"],
+            scope=scope,
             verdict=d["verdict"],
             priority=int(d.get("priority", 50)),
             confidence=d.get("confidence", "moyenne"),
@@ -266,24 +300,49 @@ class FlowVerdict:
 
 
 def load_rules(extra_files: Optional[list[str | Path]] = None) -> list[Rule]:
-    files = [Path(__file__).parent / "builtin.yaml"]
-    files += [Path(p) for p in (extra_files or [])]
+    """Regles de flux TCP (scope `flow`) : builtin.yaml + fichiers utilisateur."""
+    return _load([Path(__file__).parent / "builtin.yaml"], extra_files,
+                 scope="flow", probe=FlowSignals().as_dict())
+
+
+def load_dns_rules(extra_files: Optional[list[str | Path]] = None) -> list[Rule]:
+    """Regles de resolution DNS (scope `dns`) : dns.yaml + fichiers utilisateur.
+
+    Les memes fichiers `--rules` sont relus ici : une regle utilisateur est
+    routee par son `scope`, pas par le fichier ou elle se trouve."""
+    return _load([Path(__file__).parent / "dns.yaml"], extra_files,
+                 scope="dns", probe=DnsSignals().as_dict())
+
+
+def load_udp_rules(extra_files: Optional[list[str | Path]] = None) -> list[Rule]:
+    """Regles de conversation UDP (scope `udp`) : udp.yaml + utilisateur."""
+    return _load([Path(__file__).parent / "udp.yaml"], extra_files,
+                 scope="udp", probe=UdpSignals().as_dict())
+
+
+def _load(base: list[Path], extra_files: Optional[list[str | Path]],
+          scope: str, probe: dict) -> list[Rule]:
+    files = list(base) + [Path(p) for p in (extra_files or [])]
     rules: list[Rule] = []
     seen_ids: set[str] = set()
-    # Dry-run de chaque regle sur un FlowSignals vide : une typo de champ
+    # Dry-run de chaque regle sur un jeu de signaux vide : une typo de champ
     # explose ICI, au chargement, pas au milieu d'une analyse.
-    probe = FlowSignals().as_dict()
     for f in files:
         doc = yaml.safe_load(f.read_text(encoding="utf-8"))
         for d in (doc or {}).get("rules", []):
             r = Rule.from_dict(d)
+            if r.scope != scope:
+                continue                 # elle sera chargee par l'autre etage
             if r.id in seen_ids:
                 raise RuleError(f"Id de regle duplique: {r.id!r} (dans {f.name})")
             seen_ids.add(r.id)
             try:
-                r.when.eval(probe)
+                # `valider` et non `eval` : sans court-circuit, sinon la
+                # moitie des conditions ne sont jamais eprouvees (voir
+                # Clause.valider).
+                r.when.valider(probe)
                 if r.unless is not None:
-                    r.unless.eval(probe)
+                    r.unless.valider(probe)
                 # TOUTES les langues sont eprouvees, pas seulement le
                 # francais : une accolade fautive dans une traduction doit
                 # exploser au chargement comme n'importe quelle autre faute de
@@ -338,24 +397,75 @@ AMBIGU_FALLBACK = Rule(
 )
 
 
+def _matches_for(sig_dict: dict, rules: list[Rule], lang: str) -> list[Match]:
+    """Confronte un jeu de signaux a des regles. Ne connait ni les flux ni le
+    DNS : c'est ce qui permet aux deux etages de partager le meme moteur."""
+    matches: list[Match] = []
+    for r in rules:
+        if not r.when.children:
+            continue
+        if not r.when.eval(sig_dict):
+            continue
+        if r.unless is not None and r.unless.eval(sig_dict):
+            continue
+        ev = [_FMT.vformat(t, (), sig_dict) for t in r.evidence_for(lang)]
+        matches.append(Match(
+            rule=r, evidence=ev, title=r.title_for(lang),
+            remediation=_FMT.vformat(r.remediation_for(lang), (), sig_dict)))
+    matches.sort(key=lambda m: -m.rule.priority)
+    return matches
+
+
+@dataclass
+class DnsVerdict:
+    """Pendant de FlowVerdict pour une resolution de nom."""
+
+    signals: DnsSignals
+    matches: list[Match] = field(default_factory=list)
+
+    @property
+    def primary(self) -> Optional[Match]:
+        return self.matches[0] if self.matches else None
+
+    @property
+    def verdict(self) -> str:
+        return self.primary.verdict if self.primary else "RAS"
+
+
+def evaluate_dns(all_signals: list[DnsSignals], rules: list[Rule],
+                 lang: str = DEFAULT_LANG) -> list[DnsVerdict]:
+    return [DnsVerdict(signals=s, matches=_matches_for(s.as_dict(), rules, lang))
+            for s in all_signals]
+
+
+@dataclass
+class UdpVerdict:
+    """Pendant de FlowVerdict pour une conversation UDP."""
+
+    signals: UdpSignals
+    matches: list[Match] = field(default_factory=list)
+
+    @property
+    def primary(self) -> Optional[Match]:
+        return self.matches[0] if self.matches else None
+
+    @property
+    def verdict(self) -> str:
+        return self.primary.verdict if self.primary else "RAS"
+
+
+def evaluate_udp(all_signals: list[UdpSignals], rules: list[Rule],
+                 lang: str = DEFAULT_LANG) -> list[UdpVerdict]:
+    return [UdpVerdict(signals=s, matches=_matches_for(s.as_dict(), rules, lang))
+            for s in all_signals]
+
+
 def evaluate(all_signals: list[FlowSignals], rules: list[Rule],
              lang: str = DEFAULT_LANG) -> list[FlowVerdict]:
     out: list[FlowVerdict] = []
     for s in all_signals:
         sig_dict = s.as_dict()
-        matches: list[Match] = []
-        for r in rules:
-            if not r.when.children:
-                continue
-            if not r.when.eval(sig_dict):
-                continue
-            if r.unless is not None and r.unless.eval(sig_dict):
-                continue
-            ev = [_FMT.vformat(t, (), sig_dict) for t in r.evidence_for(lang)]
-            matches.append(Match(
-                rule=r, evidence=ev, title=r.title_for(lang),
-                remediation=_FMT.vformat(r.remediation_for(lang), (), sig_dict)))
-        matches.sort(key=lambda m: -m.rule.priority)
+        matches = _matches_for(sig_dict, rules, lang)
         if not matches and _has_unexplained_anomaly(s):
             ev = [_FMT.vformat(t, (), sig_dict)
                   for t in AMBIGU_FALLBACK.evidence_for(lang)]
