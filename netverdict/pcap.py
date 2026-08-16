@@ -33,6 +33,15 @@ from .i18n import DEFAULT_LANG, t
 # sans rien perdre d'utile.
 MAX_TCP_PAYLOAD_KEPT = 8192
 
+# Types ICMP qui EMBARQUENT le paquet fautif, donc rattachables a une
+# conversation. Les types purement informatifs (echo/reply, decouverte de
+# voisins IPv6, annonces de routeur) en sont exclus : ils ne portent aucun
+# quadruplet et n'ont rien a dire d'un flux.
+#   v4 : 3 unreachable, 4 source quench, 11 time exceeded, 12 parameter problem
+#   v6 : 1 unreachable, 2 PACKET TOO BIG, 3 time exceeded, 4 parameter problem
+ICMP4_ERREURS = frozenset({3, 4, 11, 12})
+ICMP6_ERREURS = frozenset({1, 2, 3, 4})
+
 # Linktypes rencontres en pratique sur les captures d'admins.
 # (tcpdump Linux = EN10MB ou LINUX_SLL selon -i any ; pktmon Windows = EN10MB ;
 #  loopback Windows/Npcap et BSD = NULL ; certains equipements exportent du RAW.)
@@ -104,6 +113,12 @@ class IcmpEvent:
     # memes ports, et surtout les erreurs UDP n'avaient nulle part ou aller.
     orig_proto: int = 0
 
+    # True quand l'erreur a ete lue dans un paquet ICMPv6. Les deux familles
+    # numerotent leurs types independamment : le type 3 vaut « destination
+    # unreachable » en v4 et « time exceeded » en v6. Sans cette distinction,
+    # toute lecture de type/code est ambigue (revue du 16/08/2026).
+    v6: bool = False
+
     # Codes ICMPv4 type 3 qui signent un refus administratif (REJECT).
     ADMIN_PROHIBITED = {9, 10, 13}
     FRAG_NEEDED = 4
@@ -111,18 +126,45 @@ class IcmpEvent:
 
     @property
     def is_admin_prohibited(self) -> bool:
+        """REJECT explicite. ICMPv6 le signale par type 1 code 1
+        (« communication with destination administratively prohibited »),
+        que la version precedente ne reconnaissait pas - un pare-feu IPv6 qui
+        REJETTE passait donc pour un DROP silencieux."""
+        if self.v6:
+            return self.type == 1 and self.code == 1
         return self.type == 3 and self.code in self.ADMIN_PROHIBITED
 
     @property
     def is_frag_needed(self) -> bool:
+        """MTU du chemin. En IPv6 il n'y a pas de fragmentation par les
+        routeurs : c'est le type 2 « Packet Too Big » qui porte l'information,
+        et il EST le mecanisme de PMTUD. Ne pas le lire rendait le trou noir
+        MTU indetectable sur tout un protocole (revue du 16/08/2026)."""
+        if self.v6:
+            return self.type == 2
         return self.type == 3 and self.code == self.FRAG_NEEDED
 
     @property
     def is_port_unreachable(self) -> bool:
         """« Rien n'ecoute sur ce port » — l'equivalent UDP du RST au SYN.
-        En ICMPv6 c'est le type 1 code 4 (port unreachable)."""
-        return ((self.type == 3 and self.code == self.PORT_UNREACHABLE)
-                or (self.type == 1 and self.code == 4))
+        En ICMPv6 c'est le type 1 code 4."""
+        if self.v6:
+            return self.type == 1 and self.code == 4
+        return self.type == 3 and self.code == self.PORT_UNREACHABLE
+
+    @property
+    def is_unreachable(self) -> bool:
+        """Famille « destination unreachable » : v4 type 3, v6 type 1. Les
+        autres erreurs (TTL exceeded, Packet Too Big, parameter problem) sont
+        rattachees elles aussi, mais ne sont PAS des unreachable - les
+        confondre ferait ecrire « N ICMP unreachable » sous une preuve qui
+        n'en contient aucun."""
+        return self.type == (1 if self.v6 else 3)
+
+    @property
+    def label(self) -> str:
+        """Designation courte pour le rapport, sans interpretation."""
+        return f"{'ICMPv6' if self.v6 else 'ICMP'} type {self.type} code {self.code}"
 
 
 def _detect_mixed_linktypes(path) -> bool:
@@ -221,6 +263,12 @@ class Capture:
     # doit etre bornee par la fin REELLE de la capture, sinon on la declarerait
     # « sans reponse » alors que la capture s'est simplement arretee avant.
     t_last_seen: Optional[float] = None
+    # Deuxieme plus grand horodatage. Sert a reperer un t_last_seen ABERRANT :
+    # un seul paquet date dans le futur (horloge d'equipement folle, capture
+    # concatenee, epoch mal converti) etirait la fin de capture de plusieurs
+    # annees, et toute duree calculee contre elle devenait absurde - « aucune
+    # reponse en 31536000000 ms » (revue du 16/08/2026).
+    t_avant_dernier: Optional[float] = None
 
     @property
     def t_first(self) -> Optional[float]:
@@ -315,7 +363,7 @@ def _parse_ws_option(tcp: dpkt.tcp.TCP) -> Optional[int]:
 
 
 def _extract_icmp_event(ts: float, ip, icmp_payload: bytes, icmp_type: int,
-                        icmp_code: int) -> Optional[IcmpEvent]:
+                        icmp_code: int, v6: bool = False) -> Optional[IcmpEvent]:
     """Le payload d'un ICMP d'erreur = en-tete IP + >=8 octets du transport
     du paquet fautif. Assez pour retrouver (src, dst, sport, dport)."""
     try:
@@ -349,6 +397,7 @@ def _extract_icmp_event(ts: float, ip, icmp_payload: bytes, icmp_type: int,
             type=icmp_type,
             code=icmp_code,
             orig_proto=int(proto or 0),
+            v6=v6,
         )
     except Exception:
         return None
@@ -383,7 +432,10 @@ def read_capture(path: str | Path, lang: str = DEFAULT_LANG) -> Capture:
             # forcement dans l'ordre (c'est deja pourquoi les listes sont
             # triees plus bas).
             if cap.t_last_seen is None or ts > cap.t_last_seen:
+                cap.t_avant_dernier = cap.t_last_seen
                 cap.t_last_seen = float(ts)
+            elif cap.t_avant_dernier is None or ts > cap.t_avant_dernier:
+                cap.t_avant_dernier = float(ts)
             try:
                 ip = _ip_from_frame(buf, st.linktype)
             except Exception:
@@ -440,9 +492,15 @@ def read_capture(path: str | Path, lang: str = DEFAULT_LANG) -> Capture:
                 ))
             elif isinstance(data, dpkt.icmp.ICMP):
                 st.icmp += 1
-                # Seul le type 3 (unreachable) porte un verdict ; echo/reply
-                # et TTL exceeded viendront avec l'analyse traceroute (v2).
-                if data.type == 3:
+                # TOUS les types d'ERREUR, pas seulement le type 3. Un ICMP
+                # d'erreur embarque le paquet fautif, donc il se rattache a une
+                # conversation - et une erreur rattachee mais non interpretee
+                # vaut mieux qu'une erreur invisible. Avant, un type 11 (TTL
+                # exceeded, boucle de routage) etait compte dans l'en-tete puis
+                # oublie : le rapport annoncait « 1 ICMP » et une regle
+                # affirmait deux lignes plus bas « aucune erreur ICMP »
+                # (revue du 16/08/2026).
+                if data.type in ICMP4_ERREURS:
                     ev = _extract_icmp_event(float(ts), ip, bytes(data.data.data)
                                              if hasattr(data.data, "data") else b"",
                                              data.type, data.code)
@@ -450,10 +508,14 @@ def read_capture(path: str | Path, lang: str = DEFAULT_LANG) -> Capture:
                         cap.icmp_events.append(ev)
             elif isinstance(data, dpkt.icmp6.ICMP6):
                 st.icmp += 1
-                # ICMPv6 type 1 = destination unreachable (code 1 = admin prohibited).
-                if data.type == 1:
+                # Idem cote v6, ou la numerotation est DIFFERENTE : 1 =
+                # destination unreachable, 2 = PACKET TOO BIG (c'est LE
+                # mecanisme de decouverte de MTU en IPv6, il n'y a pas de
+                # fragmentation par les routeurs), 3 = time exceeded,
+                # 4 = parameter problem.
+                if data.type in ICMP6_ERREURS:
                     ev = _extract_icmp_event(float(ts), ip, bytes(data.data)[4:],
-                                             data.type, data.code)
+                                             data.type, data.code, v6=True)
                     if ev:
                         cap.icmp_events.append(ev)
             elif isinstance(data, dpkt.udp.UDP):
@@ -476,8 +538,12 @@ def read_capture(path: str | Path, lang: str = DEFAULT_LANG) -> Capture:
                     dispo = ip.len - (ip.hl * 4) - 8
                 elif hasattr(ip, "plen"):
                     dispo = ip.plen - 8
-                if dispo is not None and dispo >= 0:
-                    charge_len = min(charge_len, dispo)
+                if dispo is not None:
+                    # `max(dispo, 0)` et non `if dispo >= 0` : un ip.len
+                    # aberrant (0, artefact d'offload ou de troncature) rendait
+                    # dispo negatif, le bornage etait saute, et l'ulen menteur
+                    # repassait entier - le trou etait dans le garde-fou.
+                    charge_len = min(charge_len, max(dispo, 0))
                 cap.udp_packets.append(UdpPkt(
                     ts=float(ts), src=_ip_str(ip.src), dst=_ip_str(ip.dst),
                     sport=data.sport, dport=data.dport,

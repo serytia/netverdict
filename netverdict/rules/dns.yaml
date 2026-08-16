@@ -324,7 +324,10 @@ rules:
         - "latency_ms >= 1000"
     evidence:
       - "{qname} ({qtype}) resolu en {latency_ms:.0f} ms par {resolver} apres {attempts} question(s)"
-      - "adresses obtenues : {answers_str}"
+      # `answers_count` plutot que la liste seule : sous un snaplen serre les
+      # adresses sont illisibles, et la ligne sortait « adresses obtenues : »
+      # suivie du vide - une phrase qui promet une information absente.
+      - "adresses lues : {answers_count} ({answers_str})"
     remediation: |
       Ce delai est ANTERIEUR a la connexion TCP : il n'apparait dans aucune
       mesure de flux, et un verdict « transport sain » sur la connexion qui
@@ -341,7 +344,7 @@ rules:
     title_en: "Slow DNS resolution: the delay happens before the connection"
     evidence_en:
       - "{qname} ({qtype}) resolved in {latency_ms:.0f} ms by {resolver} after {attempts} query(ies)"
-      - "addresses returned: {answers_str}"
+      - "addresses read: {answers_count} ({answers_str})"
     remediation_en: |
       This delay happens BEFORE the TCP connection: it shows up in no flow
       measurement, and a "healthy transport" verdict on the connection that

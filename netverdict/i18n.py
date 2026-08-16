@@ -99,6 +99,18 @@ STRINGS: dict[str, dict[str, str]] = {
               "{other} other IP, {non_ip} non-IP, {frags} fragments, "
               "{errors} unreadable — {flows} TCP conversations",
     },
+    "err.capture_unreadable": {
+        "fr": "capture illisible : {path} ({e})",
+        "en": "capture unreadable: {path} ({e})",
+    },
+    "err.capture_corrupt": {
+        "fr": "capture corrompue ou tronquee : {path} — la lecture s'est "
+              "arretee sur {e}. Verifier que le fichier a ete transfere en "
+              "entier (un pcap coupe en plein bloc n'est pas relisible).",
+        "en": "corrupt or truncated capture: {path} — reading stopped on {e}. "
+              "Check the file was transferred in full (a pcap cut mid-block "
+              "cannot be read back).",
+    },
     "report.udp_header": {
         "fr": "Conversations UDP",
         "en": "UDP conversations",
@@ -164,6 +176,27 @@ STRINGS: dict[str, dict[str, str]] = {
         "en": "warning: {n} DNS packets read, but no resolution could be "
               "reconstructed (unreadable queries, or answers whose query "
               "predates the capture)",
+    },
+    "report.warn_horodatage": {
+        "fr": "attention : le dernier paquet est date {ecart} s apres le "
+              "precedent — horloge d'equipement, capture concatenee ou epoch "
+              "mal converti. Toute duree mesuree jusqu'a la fin de capture "
+              "est a lire avec cette reserve.",
+        "en": "warning: the last packet is dated {ecart} s after the previous "
+              "one — device clock, concatenated capture or mis-converted "
+              "epoch. Any duration measured up to the end of the capture "
+              "should be read with that caveat.",
+    },
+    "report.warn_dns_orphelins": {
+        "fr": "attention : {n} message(s) DNS lus mais rattaches a aucune "
+              "resolution (question absente de la capture, reponse trop "
+              "tardive, ou nom illisible) — un verdict « le serveur ne repond "
+              "pas » ci-dessous peut concerner une question dont la reponse "
+              "est pourtant dans ce fichier",
+        "en": "warning: {n} DNS message(s) read but attached to no resolution "
+              "(query missing from the capture, answer too late, or unreadable "
+              "name) — a « the DNS server is not answering » verdict below may "
+              "concern a query whose answer IS in this file",
     },
     "report.warn_dns_unreadable": {
         "fr": "attention : {n} datagramme(s) UDP/53 trop courts pour porter "

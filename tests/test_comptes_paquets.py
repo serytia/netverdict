@@ -172,3 +172,29 @@ def test_le_json_expose_les_nouveaux_comptes(capture_melangee, rules):
                                 + stats["other_ip"] + stats["non_ip"]
                                 + stats["fragments_skipped"]
                                 + stats["parse_errors"])
+
+
+def test_les_erreurs_icmp_autres_que_type_3_sont_rattachables(tmp_path):
+    """Seuls les type 3 (v4) et type 1 (v6) etaient decodes : un TTL exceeded
+    etait compte dans l'en-tete puis oublie, si bien qu'une regle affirmait
+    « aucune erreur ICMP » deux lignes plus bas (revue du 16/08/2026)."""
+    from netverdict.pcap import read_capture
+
+    orig = dpkt.udp.UDP(sport=40000, dport=123)
+    orig.data = b"\x1b" + b"\x00" * 47
+    orig.ulen = 56
+    oip = _ip(CLIENT, SERVER, dpkt.ip.IP_PROTO_UDP, orig, ip_id=9)
+    ic = dpkt.icmp.ICMP(type=11, code=0)               # TTL exceeded
+    ic.data = dpkt.icmp.ICMP.TimeExceed(data=oip)
+    trames = [(0.0, _udp(CLIENT, SERVER, 40000, 123)),
+              (0.5, _eth(_ip("10.0.0.1", CLIENT, dpkt.ip.IP_PROTO_ICMP, ic, ip_id=10)))]
+    chemin = tmp_path / "ttl.pcap"
+    with open(chemin, "wb") as f:
+        w = dpkt.pcap.Writer(f)
+        for ts, buf in trames:
+            w.writepkt(buf, ts=ts)
+    cap = read_capture(chemin)
+    assert cap.stats.icmp == 1
+    assert len(cap.icmp_events) == 1, "le TTL exceeded n'est pas rattachable"
+    assert cap.icmp_events[0].label == "ICMP type 11 code 0"
+    assert cap.icmp_events[0].is_unreachable is False

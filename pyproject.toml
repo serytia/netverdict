@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "netverdict"
 version = "0.8.0"
-description = "Triage d'incident reseau/app/OS : analyse une capture et rend un verdict argumente avec preuves"
+description = "Network incident triage: the packet capture says whether the problem is the network, the application or the host — with evidence and a suggested fix."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "GPL-2.0-only" }

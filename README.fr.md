@@ -8,7 +8,7 @@
 **La capture reseau dit si le probleme vient du reseau, de l'application ou du
 systeme — avec les preuves, et une piste de correction.**
 
-🇬🇧 [English version: README.md](README.md)
+🇬🇧 [English version: README.md](https://github.com/serytia/netverdict/blob/main/README.md)
 
 Fini le blame game "c'est le reseau / c'est l'appli / c'est le serveur".
 `netverdict` lit un pcap (et si possible un snapshot de l'etat de l'hote pris
@@ -18,7 +18,7 @@ au meme moment), en extrait les signaux TCP qui ne mentent pas, et rend un
 ```
 $ netverdict analyze capture.pcapng --snapshot snapshot.json
 
-18 paquets lus - 18 TCP, 0 UDP, 0 ICMP, 0 autres IP, 0 non-IP, 0 fragments, 0 illisibles - 1 conversations
+18 paquets lus - 18 TCP, 0 UDP, 0 ICMP, 0 autres IP, 0 non-IP, 0 fragments, 0 illisibles - 1 conversations TCP
 +---------  APP - 10.0.0.42:51006 -> 10.0.0.5:5432 [confiance haute] --------+
 | Reponse applicative lente, reception prouvee par ACK rapide                |
 |   * 3 echanges : ACK serveur en 5 ms mais reponse en 800 ms (p50), 0 perte |
@@ -183,10 +183,16 @@ payload compris. Mesure :
 Autrement dit : la troncature elimine les gros transferts, pas les secrets
 courts — et les protocoles d'authentification en clair sont precisement courts.
 Traiter un bundle comme une donnee sensible : le relire avant de le transmettre,
-et preferer `--full-packets` uniquement quand c'est necessaire et assume.
+et ne recourir aux options « paquets entiers » des scripts de capture
+(`capture.ps1 -FullPackets` sous Windows, `capture.sh -s 0` sous Linux) que
+lorsque c'est necessaire et assume.
 
-L'option `--explain` n'envoie jamais le pcap : uniquement le rapport JSON
-(signaux et verdicts).
+L'option `--explain` n'envoie jamais le pcap. Elle envoie en revanche le
+rapport JSON, et celui-ci contient plus que des verdicts : adresses IP, ports,
+noms DNS resolus, et — quand des sources hote sont fournies — noms de process,
+noms d'utilisateurs, ainsi que **le corps de chaque ligne de journal** passee
+par `--events` / `--syslog` / `--audit`. Voir
+[SECURITY.md](https://github.com/serytia/netverdict/blob/main/SECURITY.md).
 
 ## DNS : le temps que le TCP ne peut pas montrer
 
@@ -195,7 +201,7 @@ que l'etage TCP sait mesurer - et c'est pourquoi, jusqu'a la 0.7, une capture
 ou l'utilisateur avait attendu 2,4 s donnait ceci :
 
 ```
-13 paquets lus - 10 TCP, 0 ICMP, 0 non-IP, 0 illisibles
+13 paquets lus - 10 TCP, 0 UDP, 0 ICMP, 0 autres IP, 0 non-IP, 0 fragments, 0 illisibles
 [RAS] 1 conversation(s) au transport sain            # code retour 0
 ```
 
@@ -284,7 +290,7 @@ un avec les extras installes, un sur le paquet construit.
 
 ## Statut de validation
 
-- **Valide** : 462 tests automatises, verts sur Linux, Windows et macOS
+- **Valide** : 485 tests automatises, verts sur Linux, Windows et macOS
   (Python 3.11 a 3.13) et sous fuseau decale.
 - **Valide au kernel** : 8 scenarios de panne reproduits par un vrai noyau
   Linux (netem, iptables, vraies sockets — `lab/`), plus la jointure auditd

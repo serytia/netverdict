@@ -314,6 +314,7 @@ def _cle(msg: DnsMsg) -> Optional[tuple]:
 
 def build_resolutions(msgs: Iterable[DnsMsg], capture_end: Optional[float] = None,
                       tcp53: Optional[Iterable[tuple]] = None,
+                      orphelines: Optional[list] = None,
                       ) -> list[DnsResolution]:
     """Regroupe les messages en resolutions, dans l'ordre du temps.
 
@@ -337,6 +338,8 @@ def build_resolutions(msgs: Iterable[DnsMsg], capture_end: Optional[float] = Non
         if k is None:
             # Question illisible (tronquee des le nom) : on ne peut la
             # rattacher a rien sans risquer de melanger deux resolutions.
+            if orphelines is not None:
+                orphelines.append(m)
             continue
         res = ouvertes.get(k)
         if res is not None and (res.response is not None
@@ -344,9 +347,17 @@ def build_resolutions(msgs: Iterable[DnsMsg], capture_end: Optional[float] = Non
             res = None
         if m.is_response:
             if res is None:
-                # Reponse sans question observee (capture demarree trop tard) :
-                # elle ne prouve aucune latence, on ne fabrique pas de
-                # resolution autour d'elle.
+                # Reponse sans question observee (capture demarree trop tard,
+                # reponse arrivee au-dela du regroupement, echo de question
+                # absent comme le permet RFC 8906) : elle ne prouve aucune
+                # latence, on ne fabrique pas de resolution autour d'elle.
+                #
+                # Mais on la COMPTE : sans cela, une resolution pouvait sortir
+                # « le serveur DNS ne repond pas », RESEAU confiance haute,
+                # alors que la reponse du serveur etait dans la capture, lue
+                # et jetee en silence (revue du 16/08/2026).
+                if orphelines is not None:
+                    orphelines.append(m)
                 continue
             res.response = m
             if m.src not in res.resolvers:

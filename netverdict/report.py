@@ -21,6 +21,11 @@ from .rules.engine import FlowVerdict
 from .hostsnap import HostSnapshot
 from .timeline import Timeline
 
+# Au-dela de cet ecart entre les DEUX derniers horodatages, le dernier paquet
+# est un aberrant, pas la fin de la capture : une heure separe deja largement
+# deux paquets d'une meme session, meme tres calme.
+HORODATAGE_ABERRANT_S = 3600.0
+
 VERDICT_STYLE = {
     "RESEAU": "bold red",
     "APP": "bold yellow",
@@ -145,7 +150,8 @@ def render_console(cap: Capture, verdicts: list[FlowVerdict],
                    lang: str = DEFAULT_LANG,
                    dns_verdicts: Optional[list] = None,
                    dns_links: Optional[dict] = None,
-                   udp_verdicts: Optional[list] = None) -> None:
+                   udp_verdicts: Optional[list] = None,
+                   dns_orphelines: int = 0) -> None:
     con = console or Console()
     st = cap.stats
     # Suspects rattaches a chaque flux. Indexe par position dans `verdicts`,
@@ -183,6 +189,18 @@ def render_console(cap: Capture, verdicts: list[FlowVerdict],
     if st.dns_unreadable:
         con.print(Text(t("report.warn_dns_unreadable", lang, n=st.dns_unreadable),
                        style="bold yellow"))
+    # Messages DNS lus mais rattaches a aucune resolution. Les taire faisait
+    # affirmer « le serveur ne repond pas » avec la reponse dans la capture.
+    # Un dernier paquet isole tres loin des autres : toutes les durees
+    # calculees contre la fin de capture sont alors fausses.
+    if (cap.t_last_seen is not None and cap.t_avant_dernier is not None
+            and cap.t_last_seen - cap.t_avant_dernier > HORODATAGE_ABERRANT_S):
+        con.print(Text(t("report.warn_horodatage", lang,
+                         ecart=int(cap.t_last_seen - cap.t_avant_dernier)),
+                       style="bold yellow"))
+    if dns_orphelines:
+        con.print(Text(t("report.warn_dns_orphelins", lang, n=dns_orphelines),
+                       style="bold yellow"))
     if st.unsupported_linktype:
         con.print(Text(t("report.warn_linktype", lang), style="bold red"))
     if st.mixed_linktypes:
@@ -196,16 +214,25 @@ def render_console(cap: Capture, verdicts: list[FlowVerdict],
     # apres reviendrait a lire l'histoire a l'envers.
     dns_links = dns_links or {}
     if dns_verdicts:
-        noms_vers_flux: dict[str, list[str]] = {}
+        # Cle (nom, CLIENT) et non le nom seul : sans le client, une
+        # resolution EN ECHEC d'un poste se voyait crediter les connexions
+        # faites par un AUTRE poste ayant resolu le meme nom. Le panneau se
+        # contredisait alors lui-meme - « connexion(s) qui ont suivi : ... »
+        # au-dessus de « la connexion qui devait suivre n'a donc jamais pu
+        # commencer » (revue du 16/08/2026). C'est le meme defaut que celui
+        # corrige dans link_flows la veille, reste ici.
+        noms_vers_flux: dict[tuple, list[str]] = {}
         for index, lien in dns_links.items():
             if not lien.explains_delay or index >= len(verdicts):
                 continue
-            s = verdicts[index].signals
-            noms_vers_flux.setdefault(lien.qname, []).append(
-                f"{s.server}:{s.sport}")
+            sf = verdicts[index].signals
+            noms_vers_flux.setdefault((lien.qname, sf.client), []).append(
+                f"{sf.server}:{sf.sport}")
         dns_sains = 0
         dns_muets = 0
         coupees = 0
+        dns_caches = 0
+        dns_affiches = 0
         entete_posee = False
         for dv in sorted(dns_verdicts, key=lambda d: d.signals.t_first):
             ds = dv.signals
@@ -221,17 +248,21 @@ def render_console(cap: Capture, verdicts: list[FlowVerdict],
             if dv.verdict == "RAS":
                 dns_sains += 1
                 continue
+            if entete_posee and dns_affiches >= top:
+                dns_caches += 1          # --top borne AUSSI cette section
+                continue
             if not entete_posee:
                 con.print()
                 con.print(Text(t("report.dns_header", lang), style="bold"))
                 entete_posee = True
+            dns_affiches += 1
             m = dv.primary
             style = VERDICT_STYLE.get(m.verdict, "bold")
             body = Text()
             body.append(f"{m.title}\n", style="bold")
             for ev in m.evidence:
                 body.append(f"  * {ev}\n")
-            suivants = noms_vers_flux.get(ds.qname)
+            suivants = noms_vers_flux.get((ds.qname, ds.client))
             if suivants:
                 body.append(f"  * {t('report.dns_leads_to', lang)}"
                             f"{', '.join(sorted(set(suivants)))}\n", style="cyan")
@@ -253,6 +284,9 @@ def render_console(cap: Capture, verdicts: list[FlowVerdict],
         if dns_muets:
             con.print(Text(t("report.dns_silent", lang, n=dns_muets),
                            style="dim"))
+        if dns_caches:
+            con.print(Text(t("report.hidden_flows", lang, n=dns_caches),
+                           style="dim"))
 
     # --- Conversations UDP ----------------------------------------------
     # Apres le DNS et avant le TCP : ce sont des echanges de meme nature que
@@ -261,20 +295,30 @@ def render_console(cap: Capture, verdicts: list[FlowVerdict],
     if udp_verdicts:
         udp_sains = 0
         udp_muets = 0
+        udp_caches = 0
+        udp_affiches = 0
         entete_posee = False
         for uv in sorted(udp_verdicts, key=lambda u: u.signals.t_first):
             us = uv.signals
-            # Voir la section DNS : un silence n'est pas une sante.
+            # Voir la section DNS : un silence n'est pas une sante. Les
+            # conversations prises en charge par l'etage DNS sont exclues du
+            # compte : les annoncer « sans verdict » alors qu'elles en ont
+            # recu un, plus haut, contredit le rapport lui-meme.
             if uv.primary is None:
-                udp_muets += 1
+                if not us.dns_handled:
+                    udp_muets += 1
                 continue
             if uv.verdict == "RAS":
                 udp_sains += 1
+                continue
+            if entete_posee and udp_affiches >= top:
+                udp_caches += 1
                 continue
             if not entete_posee:
                 con.print()
                 con.print(Text(t("report.udp_header", lang), style="bold"))
                 entete_posee = True
+            udp_affiches += 1
             m = uv.primary
             style = VERDICT_STYLE.get(m.verdict, "bold")
             body = Text()
@@ -301,6 +345,9 @@ def render_console(cap: Capture, verdicts: list[FlowVerdict],
                            style="dim"))
         if udp_muets:
             con.print(Text(t("report.udp_silent", lang, n=udp_muets),
+                           style="dim"))
+        if udp_caches:
+            con.print(Text(t("report.hidden_flows", lang, n=udp_caches),
                            style="dim"))
 
     ordered = sorted(verdicts, key=_sort_key)
@@ -424,7 +471,8 @@ def to_json(cap: Capture, verdicts: list[FlowVerdict],
             lang: str = DEFAULT_LANG,
             dns_verdicts: Optional[list] = None,
             dns_links: Optional[dict] = None,
-            udp_verdicts: Optional[list] = None) -> str:
+            udp_verdicts: Optional[list] = None,
+            dns_orphelines: int = 0) -> str:
     """Rapport machine.
 
     Les CLES et les JETONS (verdict, confidence, side) ne suivent PAS la
@@ -443,6 +491,7 @@ def to_json(cap: Capture, verdicts: list[FlowVerdict],
                   "fragments_skipped": st.fragments_skipped,
                   "parse_errors": st.parse_errors,
                   "dns_unreadable": st.dns_unreadable,
+                  "dns_orphelins": dns_orphelines,
                   "linktype": st.linktype,
                   "mixed_linktypes": st.mixed_linktypes},
         "flows": [],

@@ -100,6 +100,49 @@ rules:
          protocol is closed at IP level (host/port unreachable).
       4. Check name resolution/ARP on the last hop before {server}.
 
+  - id: syn-no-answer-icmp-autre
+    verdict: RESEAU
+    priority: 89
+    confidence: moyenne
+    title: "SYN sans reponse, avec une erreur ICMP non interpretee"
+    when:
+      all:
+        - "syn_count >= 2"
+        - "synack_seen == false"
+        - "rst_to_syn == false"
+        - "icmp_count >= 1"
+        - "icmp_unreach_count == 0"
+    unless:
+      - "icmp_admin_prohibited == true"
+    evidence:
+      - "{syn_count} SYN de {client} vers {server}:{sport}, aucun SYN/ACK"
+      - "{icmp_other_label} rattache au flux : le reseau a repondu quelque chose, mais pas une erreur que netverdict sait classer"
+    remediation: |
+      Le reseau n'est pas muet : il a renvoye une erreur ICMP que cet outil ne
+      sait pas interpreter. La signaler vaut mieux que l'ignorer - sans cette
+      regle, le rapport aurait affirme « aucun ICMP » avec cette erreur dans
+      la capture.
+      Les cas les plus frequents :
+      - type 11 (TTL exceeded) : boucle de routage, ou un traceroute en cours
+        au moment de la capture ;
+      - type 12 / parameter problem : un equipement rejette l'en-tete du
+        paquet (option IP inhabituelle, tunnel mal forme).
+      Lire l'erreur telle quelle : `tcpdump -r <fichier> icmp or icmp6`.
+    title_en: "SYN unanswered, with an ICMP error left uninterpreted"
+    evidence_en:
+      - "{syn_count} SYN from {client} to {server}:{sport}, no SYN/ACK"
+      - "{icmp_other_label} attached to the flow: the network did answer something, but not an error netverdict can classify"
+    remediation_en: |
+      The network is not silent: it returned an ICMP error this tool cannot
+      interpret. Naming it beats ignoring it - without this rule the report
+      would have claimed "no ICMP" with that error sitting in the capture.
+      Most frequent cases:
+      - type 11 (TTL exceeded): routing loop, or a traceroute in flight when
+        the capture was taken;
+      - type 12 / parameter problem: a device rejects the packet header
+        (unusual IP option, malformed tunnel).
+      Read the error as-is: `tcpdump -r <file> icmp or icmp6`.
+
   - id: syn-no-answer
     verdict: RESEAU
     priority: 90
@@ -112,10 +155,21 @@ rules:
         - "syn_count >= 2"
         - "synack_seen == false"
         - "rst_to_syn == false"
-        # La preuve ci-dessous AFFIRME « aucun ICMP ». La regle ne doit donc pas
-        # matcher quand des ICMP unreachable ont ete rattaches, sinon le rapport
-        # contredit le pcap qu'il vient de lire (revue du 25/07/2026). Ce cas a
-        # sa propre regle : syn-no-answer-icmp-unreach, juste au-dessus.
+        # La preuve ci-dessous AFFIRME « aucun ICMP ». La regle ne doit donc
+        # pas matcher des qu'UNE erreur ICMP - de n'importe quel type - a ete
+        # rattachee, sinon le rapport contredit le pcap qu'il vient de lire
+        # (revue du 25/07/2026). Le garde portait sur les seuls unreachable ;
+        # depuis que les TTL exceeded et Packet Too Big sont lus, il porte sur
+        # le compte TOTAL (revue du 16/08/2026). Les deux cas couverts ont
+        # leur propre regle : syn-no-answer-icmp-unreach et
+        # syn-no-answer-icmp-autre.
+        #
+        # LES DEUX compteurs, et non le seul total : une garde qui protege une
+        # AFFIRMATION doit rester conservatrice quelle que soit la facon dont
+        # les signaux ont ete construits. Ne tester que icmp_count laissait
+        # « aucun ICMP » ressortir des qu'un appelant renseignait le detail
+        # sans le total.
+        - "icmp_count == 0"
         - "icmp_unreach_count == 0"
     unless:
       # Si un REJECT explicite existe, la regle reject-icmp raconte mieux.

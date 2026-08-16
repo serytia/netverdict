@@ -8,7 +8,7 @@
 **The packet capture says whether the problem is the network, the application
 or the host — with the evidence, and a suggested fix.**
 
-🇫🇷 [Version française : README.fr.md](README.fr.md)
+🇫🇷 [Version française : README.fr.md](https://github.com/serytia/netverdict/blob/main/README.fr.md)
 
 No more "it's the network / it's the app / it's the server" blame game.
 `netverdict` reads a pcap (plus, when available, a snapshot of the host state
@@ -18,7 +18,7 @@ an **argued verdict**:
 ```
 $ netverdict analyze capture.pcapng
 
-18 packets read — 18 TCP, 0 UDP, 0 ICMP, 0 other IP, 0 non-IP, 0 fragments, 0 unreadable — 1 conversations
+18 packets read — 18 TCP, 0 UDP, 0 ICMP, 0 other IP, 0 non-IP, 0 fragments, 0 unreadable — 1 conversations TCP
 ┌─────────  APP — 10.0.0.42:51006 -> 10.0.0.5:5432 [high confidence] ─────────┐
 │ Slow application response, reception proven by a fast ACK                   │
 │   * 3 exchanges: server ACK in 5 ms but response in 800 ms (p50), 0 loss    │
@@ -79,8 +79,8 @@ export NETVERDICT_LANG=fr                 # Windows: $env:NETVERDICT_LANG="fr"
 ```
 
 `--lang` translates verdict titles, evidence, suggested fixes, the timeline,
-`--help`, error messages, and the language requested from the model by
-`--explain`. `--lang` beats `$NETVERDICT_LANG`, which beats the default.
+most error messages, and the language requested from the model by `--explain`.
+Argparse's own `--help` text and the capture scripts stay in French. `--lang` beats `$NETVERDICT_LANG`, which beats the default.
 
 What `--lang` deliberately never changes: the verdict tokens (`RESEAU`, `APP`,
 `OS`, `HOTE`, `AMBIGU`, `RAS`), `confidence` values and JSON keys. Those are
@@ -183,10 +183,15 @@ payload included. Measured:
 
 In other words: truncation removes large transfers, not short secrets — and
 cleartext authentication protocols are precisely short. Treat a bundle as
-sensitive data: review it before sharing it, and reserve `--full-packets`
-for when it is necessary and deliberate.
+sensitive data: review it before sharing it, and reserve the full-packet
+options of the capture scripts (`capture.ps1 -FullPackets` on Windows,
+`capture.sh -s 0` on Linux) for when they are necessary and deliberate.
 
-`--explain` never sends the pcap: only the JSON report (signals and verdicts).
+`--explain` never sends the pcap. It does send the JSON report, and that
+report contains more than verdicts: IP addresses, ports, resolved DNS names,
+and — when host sources are used — process names, usernames, and **the
+message body of every timeline entry** you passed with `--events` /
+`--syslog` / `--audit`. See [SECURITY.md](https://github.com/serytia/netverdict/blob/main/SECURITY.md).
 
 ## How it works
 
@@ -219,7 +224,7 @@ timezone, one with the extras installed, one against the built package.
 
 ## Validation status
 
-- **Validated**: 462 automated tests, green on Linux, Windows and macOS
+- **Validated**: 485 automated tests, green on Linux, Windows and macOS
   (Python 3.11 to 3.13) and under a shifted timezone.
 - **Validated against a kernel**: 8 failure scenarios reproduced by a real
   Linux kernel (netem, iptables, real sockets — `lab/`), plus the auditd join
@@ -230,7 +235,7 @@ timezone, one with the extras installed, one against the built package.
   at `-s 96` where the answers are unreadable. That confrontation found one
   real defect — a TCP/53 retry merely *attempted* counted as a *successful*
   one, which silenced the verdict in exactly the case it exists to catch —
-  and two defects in the test bench itself.
+  and three defects in the test bench itself.
 - **UDP validated against a kernel**: 5 scenarios (`lab/udp_scenario.sh`)
   where the ICMP errors are emitted by the Linux stack itself. One of them is
   a NEGATIVE WITNESS: a one-way syslog flow, on which netverdict must stay
@@ -330,7 +335,7 @@ everything the TCP stage can measure — which is why, until v0.7, a capture
 where the user waited 2.4 seconds produced this:
 
 ```
-13 packets read — 10 TCP, 0 ICMP, 0 non-IP, 0 unreadable
+13 packets read — 10 TCP, 0 UDP, 0 ICMP, 0 other IP, 0 non-IP, 0 fragments, 0 unreadable
 [CLEAN] 1 conversation(s) with healthy transport          # exit code 0
 ```
 

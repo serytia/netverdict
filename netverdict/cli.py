@@ -44,6 +44,22 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     except ValueError as e:
         print(f"{e}", file=sys.stderr)
         return 2
+    except OSError as e:
+        # Repertoire passe a la place d'un fichier, droits insuffisants,
+        # peripherique disparu... Sans cette branche : traceback nu et code
+        # retour 1, c'est-a-dire le code de « des verdicts ont ete trouves ».
+        print(t("err.capture_unreadable", lang, path=args.capture, e=e),
+              file=sys.stderr)
+        return 2
+    except Exception as e:
+        # Filet volontairement large, et uniquement ICI : une capture peut
+        # etre coupee en plein bloc (transfert interrompu, disque plein), et
+        # dpkt leve alors NeedData depuis les entrailles du lecteur. Le
+        # contrat publie est « 2 = erreur » : un pcap illisible ne doit jamais
+        # ressortir avec le code d'un verdict (revue du 16/08/2026).
+        print(t("err.capture_corrupt", lang, path=args.capture,
+                e=type(e).__name__), file=sys.stderr)
+        return 2
 
     flows = build_flows(cap)
     signals = [compute_signals(fl) for fl in flows]
@@ -78,7 +94,12 @@ def cmd_analyze(args: argparse.Namespace) -> int:
             sp, dp = ((fl.cport, fl.sport) if du_client
                       else (fl.sport, fl.cport))
             msgs.extend(parse_dns_over_tcp(t0, src, dst, sp, dp, flux, complet))
-    resolutions = build_resolutions(msgs, cap.t_last_seen, tcp53)
+    # `orphelines` recueille les messages DNS lus mais rattachables a aucune
+    # resolution. Les ignorer en silence faisait affirmer « le serveur ne
+    # repond pas » alors que sa reponse etait dans la capture.
+    dns_orphelines: list = []
+    resolutions = build_resolutions(msgs, cap.t_last_seen, tcp53,
+                                    orphelines=dns_orphelines)
     dns_verdicts = evaluate_dns(
         [compute_dns_signals(r, cap.t_last_seen) for r in resolutions],
         dns_rules, lang)
@@ -98,19 +119,34 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     # la totalite des resolveurs, un client a deux nameservers ne voyait
     # couvert que le premier (revue du 15/08/2026).
     conversations = build_udp_conversations(cap)
-    couvert_par_dns = {(r.client, srv, port)
+    # La cle porte AUSSI le port source du client. Sans lui, une seule
+    # resolution saine musellait TOUTE conversation UDP/53 entre les deux
+    # machines : trois questions restees sans reponse sur un autre port
+    # ephemere disparaissaient du rapport, avec un code retour 0 - alors que
+    # le port 53 figure justement dans la liste des services qui repondent
+    # (revue du 16/08/2026).
+    couvert_par_dns = {(r.client, srv, port, r.attempts[0].sport)
                        for r in resolutions if r.attempts
                        for srv in r.resolvers
                        for port in (53, MDNS_PORT)}
     udp_verdicts = evaluate_udp(
         [compute_udp_signals(
-            c, dns_handled=(c.client, c.server, c.sport) in couvert_par_dns)
+            c, dns_handled=(c.client, c.server, c.sport, c.cport)
+                          in couvert_par_dns)
          for c in conversations],
         udp_rules, lang)
 
     snapshot = None
     if args.snapshot:
-        snapshot = HostSnapshot.load(args.snapshot)
+        # Protege comme --events / --syslog / --audit le sont deja. Sans cela,
+        # une faute de frappe sur --snapshot rendait un traceback et le code 1,
+        # et `--json` ecrivait un fichier de ZERO octet : un script appelant ne
+        # pouvait pas distinguer « rapport perdu » de « verdicts trouves ».
+        try:
+            snapshot = HostSnapshot.load(args.snapshot)
+        except (ValueError, OSError) as e:
+            print(f"--snapshot {args.snapshot}: {e}", file=sys.stderr)
+            return 2
 
     # Fuseau valide AVANT toute lecture : une faute de frappe doit se dire
     # tout de suite, pas apres avoir parse trois fichiers.
@@ -192,12 +228,14 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     if args.json:
         print(to_json(cap, verdicts, snapshot, timeline, lang,
                       dns_verdicts=dns_verdicts, dns_links=dns_links,
-                      udp_verdicts=udp_verdicts))
+                      udp_verdicts=udp_verdicts,
+                      dns_orphelines=len(dns_orphelines)))
     else:
         render_console(cap, verdicts, snapshot, top=args.top,
                        timeline=timeline, lang=lang,
                        dns_verdicts=dns_verdicts, dns_links=dns_links,
-                       udp_verdicts=udp_verdicts)
+                       udp_verdicts=udp_verdicts,
+                       dns_orphelines=len(dns_orphelines))
 
     if args.explain:
         from .explain import explain, ExplainUnavailable

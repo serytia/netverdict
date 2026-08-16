@@ -342,3 +342,51 @@ def test_le_port_53_compte_parmi_les_services_qui_repondent(tmp_path, udp_rules)
     assert vs[0].primary is not None
     assert vs[0].primary.rule.id == "udp-known-service-silent"
     assert vs[0].signals.service_hint == "DNS"
+
+
+# --------------------------- verrous poses par la revue avant publication
+
+def test_une_erreur_icmp_sur_le_RETOUR_est_signalee_et_pas_jetee(tmp_path,
+                                                                  udp_rules):
+    """Sur-correction du 15/08, trouvee par la revue du 16/08 : ne garder que
+    le sens client -> serveur jetait AUSSI les erreurs emises par un tiers sur
+    la voie de retour. L'outil affirmait alors « echange bidirectionnel sans
+    erreur », code retour 0, pendant que son en-tete comptait l'ICMP."""
+    orig = dpkt.udp.UDP(sport=1812, dport=40000)      # datagramme du SERVEUR
+    orig.data = b"\x01" * 20
+    orig.ulen = 28
+    oip = _ip(SERVEUR, CLIENT, dpkt.ip.IP_PROTO_UDP, orig, 42)
+    ic = dpkt.icmp.ICMP(type=3, code=4)               # frag needed sur le retour
+    ic.data = dpkt.icmp.ICMP.Unreach(data=oip)
+    vs = verdicts(tmp_path, [
+        udp(0.0, CLIENT, SERVEUR, 40000, 1812),
+        udp(0.1, SERVEUR, CLIENT, 1812, 40000),
+        (0.2, _eth(_ip("10.0.0.254", SERVEUR, dpkt.ip.IP_PROTO_ICMP, ic, 43))),
+    ], udp_rules)
+    s = vs[0].signals
+    assert s.icmp_retour is True
+    assert s.icmp_port_unreachable is False   # le serveur n'est PAS accuse
+    assert vs[0].primary is not None, "l'erreur du chemin retour a ete jetee"
+    assert vs[0].primary.rule.id == "udp-icmp-chemin-retour"
+
+
+def test_un_icmp_v6_packet_too_big_est_un_trou_noir_mtu(tmp_path, udp_rules):
+    """En IPv6 il n'y a pas de fragmentation par les routeurs : le type 2
+    « Packet Too Big » EST le mecanisme de PMTUD. Ne pas le lire rendait le
+    trou noir MTU indetectable sur tout un protocole."""
+    from netverdict.pcap import IcmpEvent
+    ev = IcmpEvent(ts=0.0, icmp_src="2001:db8::fe", orig_src="2001:db8::1",
+                   orig_dst="2001:db8::2", orig_sport=40000, orig_dport=4500,
+                   type=2, code=0, orig_proto=17, v6=True)
+    assert ev.is_frag_needed is True
+    assert ev.is_unreachable is False
+    # et le REJECT v6 (type 1 code 1) est reconnu lui aussi
+    rej = IcmpEvent(ts=0.0, icmp_src="2001:db8::fe", orig_src="2001:db8::1",
+                    orig_dst="2001:db8::2", orig_sport=40000, orig_dport=4500,
+                    type=1, code=1, orig_proto=17, v6=True)
+    assert rej.is_admin_prohibited is True
+    # ...et ne sont PAS confondus avec leurs homonymes v4
+    v4 = IcmpEvent(ts=0.0, icmp_src="10.0.0.254", orig_src="10.0.0.1",
+                   orig_dst="10.0.0.9", orig_sport=40000, orig_dport=1812,
+                   type=2, code=0, orig_proto=17, v6=False)
+    assert v4.is_frag_needed is False

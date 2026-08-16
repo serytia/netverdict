@@ -144,7 +144,7 @@ rules:
         - "icmp_admin_prohibited == false"
         - "icmp_frag_needed == false"
     evidence:
-      - "ICMP {icmp_other_label} emis par {icmp_from} pour {client}:{cport} -> {server}:{sport}"
+      - "{icmp_other_label} emis par {icmp_from} pour {client}:{cport} -> {server}:{sport}"
       - "{pkts_c2s} datagramme(s) envoye(s), {pkts_s2c} recu(s)"
     remediation: |
       Le reseau a renvoye une erreur que netverdict ne sait pas classer :
@@ -160,7 +160,7 @@ rules:
       Lire l'erreur telle quelle dans la capture : `tcpdump -r <fichier> icmp`.
     title_en: "ICMP error received on this UDP flow, but not interpreted"
     evidence_en:
-      - "ICMP {icmp_other_label} sent by {icmp_from} for {client}:{cport} -> {server}:{sport}"
+      - "{icmp_other_label} sent by {icmp_from} for {client}:{cport} -> {server}:{sport}"
       - "{pkts_c2s} datagram(s) sent, {pkts_s2c} received"
     remediation_en: |
       The network returned an error netverdict cannot classify: it is neither
@@ -173,6 +173,56 @@ rules:
       - type 11 (TTL exceeded): routing loop, or a traceroute in flight;
       - type 3 code 2 (protocol unreachable): the remote stack refuses UDP.
       Read the error as-is: `tcpdump -r <file> icmp`.
+
+  - id: udp-icmp-chemin-retour
+    scope: udp
+    verdict: AMBIGU
+    priority: 55
+    confidence: moyenne
+    title: "Erreur ICMP sur le chemin de RETOUR de cette conversation UDP"
+    when:
+      all:
+        - "icmp_retour == true"
+        - "icmp_port_unreachable == false"
+        - "icmp_admin_prohibited == false"
+        - "icmp_frag_needed == false"
+    evidence:
+      - "{icmp_retour_label} emis par {icmp_retour_from}, a propos d'un datagramme {server}:{sport} -> {client}:{cport}"
+      - "{pkts_c2s} datagramme(s) envoye(s), {pkts_s2c} recu(s)"
+    remediation: |
+      L'erreur porte sur un datagramme du serveur VERS le client, pas
+      l'inverse. Elle ne dit donc rien de l'ecoute du port {sport} : le
+      serveur a bien repondu, c'est le retour qui pose probleme. Accuser le
+      service ici designerait la machine qui a fait son travail.
+      Deux lectures, selon l'emetteur {icmp_retour_from} :
+      - c'est le CLIENT lui-meme : son socket etait deja ferme quand la
+        reponse est arrivee (application terminee, timeout applicatif trop
+        court). Le reseau n'y est pour rien.
+      - c'est un TIERS (routeur, pare-feu, tunnel) : le chemin de retour est
+        en cause - MTU reduite, filtrage asymetrique, routage de retour
+        different de l'aller. C'est le cas classique d'une capture prise du
+        cote serveur.
+      Verifier depuis le serveur : `ping -s 1400 {client}` et un traceroute
+      dans le sens {server} -> {client}.
+    title_en: "ICMP error on the RETURN path of this UDP conversation"
+    evidence_en:
+      - "{icmp_retour_label} sent by {icmp_retour_from}, about a datagram {server}:{sport} -> {client}:{cport}"
+      - "{pkts_c2s} datagram(s) sent, {pkts_s2c} received"
+    remediation_en: |
+      The error is about a datagram from the server TO the client, not the
+      other way round. It therefore says nothing about port {sport} being
+      listened to: the server did answer, it is the return path that fails.
+      Blaming the service here would point at the machine that did its job.
+      Two readings, depending on who sent it ({icmp_retour_from}):
+      - the CLIENT itself: its socket was already closed when the reply
+        arrived (application exited, application timeout too short). The
+        network is not involved.
+      - a THIRD PARTY (router, firewall, tunnel): the return path is at fault
+        - reduced MTU, asymmetric filtering, return routing differing from the
+        forward one. This is the classic case of a capture taken on the
+        server side.
+      Check from the server: `ping -s 1400 {client}` and a traceroute in the
+      {server} -> {client} direction.
 
   # ------------------------------------------------------------- le silence
   - id: udp-known-service-silent
@@ -193,6 +243,7 @@ rules:
         - "icmp_admin_prohibited == false"
         - "icmp_frag_needed == false"
         - "icmp_other == false"
+        - "icmp_retour == false"
         - "dns_handled == false"
         # LE garde-fou de cet etage. Seuls les ports dont on SAIT que le
         # serveur repond (NTP, SNMP, RADIUS, TFTP, IKE...) autorisent a dire
@@ -252,6 +303,7 @@ rules:
       all:
         - "answered == true"
         - "icmp_count == 0"      # la moindre erreur ICMP interdit « sans erreur »
+        - "icmp_retour == false" # y compris sur le chemin de retour
         - "dns_handled == false"
     evidence:
       - "{pkts_c2s} datagramme(s) envoye(s), {pkts_s2c} recu(s), premiere reponse en {first_response_ms:.0f} ms"

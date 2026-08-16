@@ -72,13 +72,22 @@ FILTER="tcp or icmp"
 # l'utilisateur a subies. Le filtre les excluait jusqu'au 15/08/2026.
 #
 # AJOUTE HORS du ciblage, et c'est delibere : `-i 10.0.0.5` ou `-p 443`
-# ecarteraient sinon les echanges avec le RESOLVEUR, qui n'est ni l'hote cible
-# ni sur le port cible - la resolution du nom vise est precisement ce qu'on
-# veut voir. Le DNS est peu volumineux, le surcout est negligeable.
+# ecarteraient sinon les echanges avec le RESOLVEUR (qui n'est ni l'hote cible
+# ni sur le port cible) et le service UDP en panne - c'est-a-dire precisement
+# ce qu'on cherche.
 #
-# Port 53 seulement : DoH et DoT (443, 853) sont chiffres ; les capturer
-# n'apprendrait rien que le filtre TCP ne prenne deja.
-FILTER="($FILTER) or (udp port 53)"
+# TOUT l'UDP, et pas seulement le port 53. La 0.8 sait diagnostiquer un
+# service UDP arrete (RADIUS, SNMP, un collecteur syslog) grace a l'ICMP
+# port-unreachable qui lui repond - mais sans les datagrammes UDP, aucune
+# conversation n'est construite, l'ICMP ne se rattache a rien, et le rapport
+# reste MUET avec un code retour 0. La fonctionnalite phare de la version
+# etait donc inatteignable par le chemin que l'outil documente lui-meme
+# (revue du 16/08/2026).
+#
+# Le surcout est reel et assume : l'UDP d'un serveur, c'est du syslog, du
+# NetFlow, parfois du VXLAN. `-d` borne la duree, `-i`/`-p` bornent la
+# cible, et le snaplen borne chaque paquet.
+FILTER="($FILTER) or udp"
 
 echo "Capture tcpdump ${DURATION}s -> $PCAP  (filtre: $FILTER, snaplen: $SNAPLEN)"
 tcpdump -i any -s "$SNAPLEN" -w "$PCAP" $FILTER &

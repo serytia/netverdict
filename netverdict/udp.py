@@ -140,17 +140,27 @@ def build_udp_conversations(cap: Capture) -> list[UdpConversation]:
         conv.pkts.append((p.ts, from_client, p.payload_len))
 
     # Rattachement des erreurs ICMP concernant de l'UDP. Elles portent le
-    # quadruplet du datagramme fautif, donc le sens de la QUESTION.
-    # UN SEUL SENS : le paquet fautif doit aller du client vers le serveur.
-    # Enregistrer aussi le sens inverse faisait qu'un ICMP port-unreachable
-    # emis par le CLIENT - a propos d'une reponse arrivee apres la fermeture
-    # de son socket, ce qui est banal - declenchait « rien n'ecoute sur ce
-    # port » CONTRE LE SERVEUR, avec confiance haute. L'outil accusait la
-    # machine qui avait correctement repondu (revue du 15/08/2026).
+    # quadruplet du datagramme fautif, donc le SENS de ce datagramme.
+    #
+    # LES DEUX SENS sont rattaches, et c'est un retour en arriere assume. Une
+    # premiere correction n'avait garde que le sens client -> serveur, pour
+    # empecher un ICMP emis par le CLIENT (a propos d'une reponse arrivee
+    # apres la fermeture de son socket) d'accuser le SERVEUR de ne rien
+    # ecouter. Le remede etait pire : il jetait AUSSI les erreurs emises par
+    # un tiers - routeur, tunnel, pare-feu du chemin retour - sur ce meme
+    # sens. Un « Packet Too Big » sur la voie de retour disparaissait, et
+    # l'outil affirmait « echange bidirectionnel sans erreur » avec un code
+    # retour 0, pendant que son propre en-tete comptait l'ICMP. Faux « tout
+    # va bien » affirmatif : exactement ce que le correctif voulait eviter,
+    # deplace d'un cran (revue du 16/08/2026).
+    #
+    # C'est donc compute_udp_signals qui TRIE : le sens du datagramme fautif
+    # et l'identite de l'emetteur decident de ce que l'erreur prouve.
     par_endpoints: dict[tuple, list[UdpConversation]] = {}
     for conv in conversations:
-        cle = ((conv.client, conv.cport), (conv.server, conv.sport))
-        par_endpoints.setdefault(cle, []).append(conv)
+        for cle in (((conv.client, conv.cport), (conv.server, conv.sport)),
+                    ((conv.server, conv.sport), (conv.client, conv.cport))):
+            par_endpoints.setdefault(cle, []).append(conv)
     for ev in cap.icmp_events:
         if ev.orig_proto != dpkt.ip.IP_PROTO_UDP:
             continue
@@ -195,6 +205,13 @@ class UdpSignals:
     # le code retour repassait a 0 (revue du 15/08/2026).
     icmp_other: bool = False
     icmp_other_label: str = ""
+    # Erreur portant sur un datagramme du sens RETOUR (serveur -> client).
+    # Elle ne dit RIEN du port serveur : elle parle du chemin de retour, ou
+    # du client qui n'ecoute plus. La distinguer evite d'accuser la machine
+    # qui a correctement repondu, sans pour autant jeter l'information.
+    icmp_retour: bool = False
+    icmp_retour_label: str = ""
+    icmp_retour_from: str = ""
     # Le port serveur est-il un service dont on SAIT qu'il repond ? C'est la
     # seule condition qui autorise a dire quoi que ce soit d'un silence.
     expects_reply: bool = False
@@ -231,15 +248,23 @@ def compute_udp_signals(conv: UdpConversation,
         # Que du trafic serveur et aucune question : l'orientation a ete
         # devinee, on ne prononce pas le mot « repondu ».
         repondu = False
-    ic_unreach = any(e.is_port_unreachable for e in conv.icmp)
-    ic_admin = any(e.is_admin_prohibited for e in conv.icmp)
-    ic_frag = any(e.is_frag_needed for e in conv.icmp)
-    emetteur = next((e.icmp_src for e in conv.icmp), "")
-    autres = [e for e in conv.icmp
+    # Une erreur ne prouve la meme chose selon le datagramme qu'elle porte.
+    #   - sur la QUESTION (client -> serveur) : elle parle du service vise.
+    #     C'est le cas nominal, celui qui porte les verdicts forts.
+    #   - sur la REPONSE (serveur -> client) : elle parle du chemin retour ou
+    #     du client. Accuser le serveur de « ne rien ecouter » sur cette base
+    #     designerait la machine qui a justement repondu.
+    sur_la_question = [e for e in conv.icmp
+                       if (e.orig_src, e.orig_sport) == (conv.client, conv.cport)]
+    sur_la_reponse = [e for e in conv.icmp if e not in sur_la_question]
+    ic_unreach = any(e.is_port_unreachable for e in sur_la_question)
+    ic_admin = any(e.is_admin_prohibited for e in sur_la_question)
+    ic_frag = any(e.is_frag_needed for e in sur_la_question)
+    emetteur = next((e.icmp_src for e in sur_la_question), "")
+    autres = [e for e in sur_la_question
               if not (e.is_port_unreachable or e.is_admin_prohibited
                       or e.is_frag_needed)]
-    label_autre = (f"type {autres[0].type} code {autres[0].code}"
-                   if autres else "")
+    label_autre = autres[0].label if autres else ""
     service = ATTENDENT_UNE_REPONSE.get(conv.sport, "")
     return UdpSignals(
         client=conv.client, server=conv.server,
@@ -257,6 +282,9 @@ def compute_udp_signals(conv: UdpConversation,
         icmp_count=len(conv.icmp),
         icmp_other=bool(autres),
         icmp_other_label=label_autre,
+        icmp_retour=bool(sur_la_reponse),
+        icmp_retour_label=sur_la_reponse[0].label if sur_la_reponse else "",
+        icmp_retour_from=sur_la_reponse[0].icmp_src if sur_la_reponse else "",
         expects_reply=bool(service),
         service_hint=service,
         dns_handled=dns_handled,

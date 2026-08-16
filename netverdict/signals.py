@@ -290,6 +290,12 @@ class FlowSignals:
     icmp_admin_prohibited_from: Optional[str] = None
     icmp_frag_needed: bool = False
     icmp_unreach_count: int = 0
+    # TOUTES les erreurs ICMP rattachees, unreachable ou non. Distinct du
+    # precedent depuis que les types 11/12 (v4) et 2/3/4 (v6) sont lus :
+    # l'affirmation « aucun ICMP » de syn-no-answer porte sur ce compte-la,
+    # tandis que « N ICMP unreachable » porte sur l'autre (revue du 16/08).
+    icmp_count: int = 0
+    icmp_other_label: str = ""
     # Plus gros segment de donnees emis par le cote FAUTIF, avant et apres le
     # premier 'fragmentation needed'. C'est la mesure qui separe les deux
     # situations que l'ICMP seul confond :
@@ -851,7 +857,11 @@ def compute_signals(fl: Flow) -> FlowSignals:
         sig.closed_by = "fin"
 
     for ev in fl.icmp:
-        sig.icmp_unreach_count += 1
+        sig.icmp_count += 1
+        if ev.is_unreachable:
+            sig.icmp_unreach_count += 1
+        elif not sig.icmp_other_label:
+            sig.icmp_other_label = ev.label
         if ev.is_admin_prohibited:
             sig.icmp_admin_prohibited = True
             sig.icmp_admin_prohibited_from = ev.icmp_src

@@ -1,0 +1,12 @@
+# Ce que le SDIST doit embarquer en plus du paquet.
+#
+# Sans ce fichier, setuptools mettait les 26 modules tests/test_*.py dans le
+# sdist mais NI conftest.py, NI make_fixtures.py, NI la moindre fixture : un
+# packageur (Debian, Fedora, conda-forge) qui recuperait le sdist et lancait
+# pytest obtenait une erreur de collecte, pas une suite verte. Un sdist dont
+# les tests ne peuvent pas tourner vaut mieux sans tests du tout - ici on
+# choisit l'inverse : ils tournent (revue du 16/08/2026).
+include LICENSE README.md README.fr.md SECURITY.md
+include tests/conftest.py tests/make_fixtures.py
+recursive-include tests/fixtures *.pcap *.pcapng *.json *.xml *.log
+recursive-include lab *.sh *.py *.cfg
