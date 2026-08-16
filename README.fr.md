@@ -290,7 +290,7 @@ un avec les extras installes, un sur le paquet construit.
 
 ## Statut de validation
 
-- **Valide** : 485 tests automatises, verts sur Linux, Windows et macOS
+- **Valide** : 489 tests automatises, verts sur Linux, Windows et macOS
   (Python 3.11 a 3.13) et sous fuseau decale.
 - **Valide au kernel** : 8 scenarios de panne reproduits par un vrai noyau
   Linux (netem, iptables, vraies sockets — `lab/`), plus la jointure auditd

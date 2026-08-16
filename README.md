@@ -224,7 +224,7 @@ timezone, one with the extras installed, one against the built package.
 
 ## Validation status
 
-- **Validated**: 485 automated tests, green on Linux, Windows and macOS
+- **Validated**: 489 automated tests, green on Linux, Windows and macOS
   (Python 3.11 to 3.13) and under a shifted timezone.
 - **Validated against a kernel**: 8 failure scenarios reproduced by a real
   Linux kernel (netem, iptables, real sockets — `lab/`), plus the auditd join

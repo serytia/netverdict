@@ -703,3 +703,54 @@ def test_une_reponse_PARSABLE_mais_tronquee_ne_publie_pas_ses_adresses():
     assert m.answers_readable is False
     # Et la latence, elle, reste juste : c'est tout l'interet du parseur maison.
     assert m.rcode == 0 and m.is_response is True
+
+
+def test_une_connexion_tcp_53_REUTILISEE_n_est_pas_prise_pour_une_absence(
+        dns_rules):
+    """RFC 7766 : un client conforme - unbound, un forwarder BIND, dnsdist -
+    REUTILISE sa connexion TCP/53 au lieu d'en ouvrir une par question.
+
+    `tcp_retry_seen` ne voit que les connexions ouvertes APRES le TC=1 : sur
+    une reutilisation il reste faux, et dns-truncated-no-tcp-retry accusait
+    « aucune reprise en TCP/53 dans la capture » alors que la reponse TCP y
+    etait - preuve contredite par le pcap, sur un comportement normal. Trouve
+    par la revue croisee du 16/08/2026, juste avant le tag 0.8.0.
+    """
+    from netverdict.dns import parse_dns_over_tcp
+
+    def tcp_msgs(ts_q, ts_r, qname):
+        """La question et sa reponse, portees par la connexion DEJA ouverte."""
+        out = parse_dns_over_tcp(ts_q, CLIENT, RESOLVER, 5000, 53,
+                                 _flux_tcp(qname=qname, question=True), True)
+        out += parse_dns_over_tcp(ts_r, RESOLVER, CLIENT, 53, 5000,
+                                  _flux_tcp(qname=qname), True)
+        return out
+
+    def udp(ts, qname, response=False, tc=False):
+        raw = dns_bytes(qname=qname, response=response, tc=tc)
+        src, dst = (RESOLVER, CLIENT) if response else (CLIENT, RESOLVER)
+        sp, dp = (53, 40000) if response else (40000, 53)
+        return parse_dns_datagram(ts, src, dst, sp, dp, raw, len(raw))
+
+    # Resolution 1 : TC=1, puis repli sur une connexion TCP ouverte a t=1.0.
+    # Resolution 2, dix secondes plus tard : TC=1, question rejouee sur LA
+    # MEME connexion - aucune connexion neuve n'apparait.
+    msgs = [udp(0.0, "big1.corp.local"),
+            udp(0.1, "big1.corp.local", response=True, tc=True),
+            udp(10.0, "big2.corp.local"),
+            udp(10.1, "big2.corp.local", response=True, tc=True)]
+    msgs += tcp_msgs(1.0, 1.2, "big1.corp.local")
+    msgs += tcp_msgs(10.2, 10.3, "big2.corp.local")
+
+    vs = _verdict(msgs, dns_rules, capture_end=15.0,
+                  tcp53=[(1.0, CLIENT, RESOLVER, True)])   # UNE connexion
+    # Un meme nom porte DEUX resolutions ici (celle qui a recu le TC=1, puis
+    # celle portee par TCP) : c'est la TRONQUEE qu'il faut examiner.
+    tronquees = {v.signals.qname: v for v in vs if v.signals.dns_truncated}
+    assert set(tronquees) == {"big1.corp.local", "big2.corp.local"}
+    big2 = tronquees["big2.corp.local"]
+    assert big2.signals.tcp_retry_seen is False   # aucune connexion NEUVE...
+    assert big2.signals.tcp_retry_ok is True      # ...mais la reponse est la
+    accusations = [m.rule.id for v in tronquees.values() for m in v.matches
+                   if m.rule.id.startswith("dns-truncated")]
+    assert accusations == [], f"accusation a tort sur une capture saine : {accusations}"

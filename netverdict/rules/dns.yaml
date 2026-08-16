@@ -267,6 +267,18 @@ rules:
       all:
         - "dns_truncated == true"
         - "tcp_retry_seen == false"
+        # `tcp_retry_seen` ne voit que les connexions TCP/53 OUVERTES apres le
+        # TC=1. Or un client conforme au RFC 7766 - unbound, un forwarder BIND,
+        # dnsdist - REUTILISE une connexion deja etablie : aucune nouvelle
+        # connexion n'apparait, `tcp_retry_seen` reste faux, et la regle
+        # accusait « aucune reprise en TCP/53 dans la capture » alors que la
+        # reponse TCP y etait. Preuve contredite par le pcap, sur un
+        # comportement parfaitement normal. `tcp_retry_ok`, lui, est arme des
+        # qu'une reponse a ete LUE sur TCP, quelle que soit l'anciennete de la
+        # connexion : c'est la garde qui manquait, et que la regle soeur
+        # dns-truncated-tcp-retry-failed portait deja (revue croisee du
+        # 16/08/2026).
+        - "tcp_retry_ok == false"
     evidence:
       - "{resolver} repond TC=1 pour {qname} ({qtype}) : reponse trop grande pour UDP"
       - "aucune reprise en TCP/53 dans la capture"
