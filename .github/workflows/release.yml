@@ -25,3 +25,12 @@ jobs:
           python -m build
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          # Idempotent : republier une version deja en ligne n'est plus une
+          # erreur, c'est un non-evenement. Sans cela, tout tag pose apres coup
+          # sur une version deja publiee - ou un simple `workflow_dispatch`,
+          # que ce workflow prevoit explicitement - se soldait par un run
+          # ROUGE et une alerte, alors que rien d'anormal ne s'etait produit.
+          # PyPI refuse de toute facon d'ecraser un fichier existant : c'est
+          # LUI qui garantit l'immuabilite, pas l'echec du run.
+          skip-existing: true
