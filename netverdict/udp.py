@@ -170,8 +170,23 @@ def build_udp_conversations(cap: Capture) -> list[UdpConversation]:
             # Le plus proche dans le temps : un meme quadruplet peut porter
             # plusieurs echanges successifs, et coller l'erreur au mauvais
             # ferait chercher la panne a la mauvaise minute.
-            min(candidats, key=lambda c: abs(c.pkts[0][0] - ev.ts)
-                if c.pkts else float("inf")).icmp.append(ev)
+            #
+            # Distance a l'INTERVALLE de la conversation, jamais a son seul
+            # premier paquet : sur une conversation longue, une erreur du
+            # MILIEU se retrouvait plus « proche » du debut d'une session
+            # FUTURE du meme quadruplet que du debut de la sienne - l'erreur
+            # changeait alors le verdict d'une session qui n'existait pas
+            # encore quand elle a ete emise (backlog 0.8.1). Zero quand
+            # l'erreur tombe dans la conversation, sinon l'ecart au bord le
+            # plus proche.
+            def _distance(c):
+                if not c.pkts:
+                    return float("inf")
+                debut, fin = c.pkts[0][0], c.pkts[-1][0]
+                if debut <= ev.ts <= fin:
+                    return 0.0
+                return min(abs(ev.ts - debut), abs(ev.ts - fin))
+            min(candidats, key=_distance).icmp.append(ev)
     return conversations
 
 

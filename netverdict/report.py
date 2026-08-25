@@ -16,15 +16,14 @@ from rich.panel import Panel
 from rich.text import Text
 
 from .i18n import DEFAULT_LANG, t
-from .pcap import Capture
+# La constante vit desormais dans pcap.py, a cote de la propriete
+# `t_fin_fiable` qui s'en sert : l'avertissement d'ici et la borne de duree
+# de la-bas doivent juger l'aberration au MEME seuil, sinon l'un avertit
+# d'une chose que l'autre continue d'utiliser (backlog 0.8.1).
+from .pcap import Capture, HORODATAGE_ABERRANT_S
 from .rules.engine import FlowVerdict
 from .hostsnap import HostSnapshot
 from .timeline import Timeline
-
-# Au-dela de cet ecart entre les DEUX derniers horodatages, le dernier paquet
-# est un aberrant, pas la fin de la capture : une heure separe deja largement
-# deux paquets d'une meme session, meme tres calme.
-HORODATAGE_ABERRANT_S = 3600.0
 
 VERDICT_STYLE = {
     "RESEAU": "bold red",

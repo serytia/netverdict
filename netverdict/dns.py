@@ -62,6 +62,17 @@ DNS_PORTS = frozenset({53, MDNS_PORT})
 # risquer de fusionner deux resolutions reellement distinctes.
 NEW_RESOLUTION_GAP_S = 30.0
 
+# En dessous de cet ecart, une question qui arrive d'un AUTRE socket avec un
+# AUTRE txid n'est pas une reemission : aucun resolveur ne rejoue aussi vite
+# (glibc attend 5 s, musl 2,5 s, systemd-resolved environ 0,8 s au plus
+# court). C'est une seconde resolution CONCURRENTE - deux process, deux
+# onglets qui veulent le meme nom au meme moment. Les fusionner fabriquait
+# une fausse « preuve de reemission », et pretait la reponse de l'une a la
+# latence de l'autre (backlog 0.8.1). Une question qui partage le socket OU
+# le txid d'une tentative existante reste une reemission quel que soit
+# l'ecart : ces deux liens-la ne mentent pas.
+CONCURRENT_GAP_S = 0.5
+
 # Au-dela de ce delai apres la derniere tentative, la capture ne s'est PAS
 # arretee trop tot : le silence a eu le temps de se manifester. Cale sur le
 # timeout de reemission des resolveurs (1 a 5 s ; glibc RES_TIMEOUT = 5 s) -
@@ -331,7 +342,12 @@ def build_resolutions(msgs: Iterable[DnsMsg], capture_end: Optional[float] = Non
     """
     ordered = sorted(msgs, key=lambda m: m.ts)
     resolutions: list[DnsResolution] = []
-    ouvertes: dict[tuple, DnsResolution] = {}
+    # PLUSIEURS resolutions peuvent etre ouvertes pour la meme cle : deux
+    # process du meme hote qui demandent le meme nom au meme moment sont deux
+    # resolutions, pas une reemission (backlog 0.8.1). La liste garde l'ordre
+    # d'ouverture ; une resolution repondue en est RETIREE (plus rien ne peut
+    # la recruter), une resolution hors fenetre y reste mais ne recrute plus.
+    ouvertes: dict[tuple, list[DnsResolution]] = {}
 
     for m in ordered:
         k = _cle(m)
@@ -341,11 +357,26 @@ def build_resolutions(msgs: Iterable[DnsMsg], capture_end: Optional[float] = Non
             if orphelines is not None:
                 orphelines.append(m)
             continue
-        res = ouvertes.get(k)
-        if res is not None and (res.response is not None
-                                or m.ts - res.t_last_attempt > NEW_RESOLUTION_GAP_S):
-            res = None
+        candidates = ouvertes.get(k, [])
         if m.is_response:
+            # La reponse porte le txid et vise le port du socket qui a pose
+            # la question : quand plusieurs resolutions du meme nom sont
+            # ouvertes, ce couple designe LA bonne. Les douze premiers octets
+            # (donc le txid) et l'en-tete UDP (donc le port) survivent a
+            # toutes les troncatures : l'appariement exact est toujours
+            # possible quand la question l'est aussi.
+            res = next((c for c in reversed(candidates)
+                        if c.response is None and any(
+                            a.txid == m.txid and a.sport == m.dport
+                            for a in c.attempts)), None)
+            # PAS de repli « la plus recente ouverte » : quand la question a
+            # ete vue, l'appariement exact reussit toujours (txid et port
+            # survivent a toutes les troncatures) ; quand elle ne l'a pas
+            # ete, coller la reponse a une resolution nee d'une AUTRE
+            # question preterait sa latence a la mauvaise. Le cas concret :
+            # une reponse DUPLIQUEE (port-miroir, dup de capture) arrivait
+            # apres que sa resolution a ete fermee, et le repli l'offrait a
+            # une resolution concurrente encore ouverte du meme nom.
             if res is None:
                 # Reponse sans question observee (capture demarree trop tard,
                 # reponse arrivee au-dela du regroupement, echo de question
@@ -362,10 +393,27 @@ def build_resolutions(msgs: Iterable[DnsMsg], capture_end: Optional[float] = Non
             res.response = m
             if m.src not in res.resolvers:
                 res.resolvers.append(m.src)
+            # La resolution repondue quitte la liste des ouvertes : tous les
+            # scans exigent `response is None`, la garder ne ferait que les
+            # allonger - et sur une capture-flood du meme nom, les allonger
+            # quadratiquement.
+            candidates.remove(res)
             continue
+        # Question : reemission d'une resolution ouverte, ou nouvelle
+        # resolution. Trois liens font la reemission - meme socket, meme
+        # txid, ou un ecart compatible avec un timeout de resolveur. Une
+        # question qui n'en a AUCUN (autre socket, autre txid, quelques
+        # millisecondes d'ecart) est une resolution concurrente.
+        res = next((c for c in reversed(candidates)
+                    if c.response is None
+                    and m.ts - c.t_last_attempt <= NEW_RESOLUTION_GAP_S
+                    and (any(a.sport == m.sport or a.txid == m.txid
+                             for a in c.attempts)
+                         or m.ts - c.t_last_attempt >= CONCURRENT_GAP_S)),
+                   None)
         if res is None:
             res = DnsResolution(client=k[0], qname=m.qname or "", qtype=m.qtype)
-            ouvertes[k] = res
+            ouvertes.setdefault(k, []).append(res)
             resolutions.append(res)
         res.attempts.append(m)
         if m.dst not in res.resolvers:
