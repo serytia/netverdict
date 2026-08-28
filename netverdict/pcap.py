@@ -33,6 +33,12 @@ from .i18n import DEFAULT_LANG, t
 # sans rien perdre d'utile.
 MAX_TCP_PAYLOAD_KEPT = 8192
 
+# Au-dela de cet ecart entre les DEUX derniers horodatages, le dernier paquet
+# est un aberrant, pas la fin de la capture : une heure separe deja largement
+# deux paquets d'une meme session, meme tres calme. Partage entre
+# l'avertissement du rapport et la propriete Capture.t_fin_fiable.
+HORODATAGE_ABERRANT_S = 3600.0
+
 # Types ICMP qui EMBARQUENT le paquet fautif, donc rattachables a une
 # conversation. Les types purement informatifs (echo/reply, decouverte de
 # voisins IPv6, annonces de routeur) en sont exclus : ils ne portent aucun
@@ -278,6 +284,22 @@ class Capture:
     def t_last(self) -> Optional[float]:
         return self.tcp_packets[-1].ts if self.tcp_packets else None
 
+    @property
+    def t_fin_fiable(self) -> Optional[float]:
+        """Fin de capture UTILISABLE dans un calcul de duree.
+
+        t_last_seen, mais juge au meme seuil que l'avertissement du rapport :
+        quand le dernier paquet est seul a plus d'une heure de tout le reste,
+        c'est un aberrant, pas la fin de la capture. Le rapport AVERTISSAIT
+        deja ; l'etage DNS, lui, continuait de mesurer « aucune reponse en
+        31536000000 ms » contre la valeur folle (backlog 0.8.1). Un seul
+        aberrant est ecarte - exactement ce que la detection sait voir."""
+        if (self.t_last_seen is not None and self.t_avant_dernier is not None
+                and self.t_last_seen - self.t_avant_dernier
+                > HORODATAGE_ABERRANT_S):
+            return self.t_avant_dernier
+        return self.t_last_seen
+
 
 PCAP_MAGICS = {b"\xa1\xb2\xc3\xd4", b"\xd4\xc3\xb2\xa1",   # pcap classique (big/little)
                b"\xa1\xb2\x3c\x4d", b"\x4d\x3c\xb2\xa1"}   # pcap nanoseconde
@@ -501,8 +523,20 @@ def read_capture(path: str | Path, lang: str = DEFAULT_LANG) -> Capture:
                 # affirmait deux lignes plus bas « aucune erreur ICMP »
                 # (revue du 16/08/2026).
                 if data.type in ICMP4_ERREURS:
-                    ev = _extract_icmp_event(float(ts), ip, bytes(data.data.data)
-                                             if hasattr(data.data, "data") else b"",
+                    corps = data.data
+                    if hasattr(corps, "data"):
+                        fautif = bytes(corps.data)
+                    else:
+                        # dpkt n'a pas de classe pour TOUS les types d'erreur
+                        # (le 12, parameter problem, notamment) : le corps
+                        # reste alors en octets bruts - 4 octets d'en-tete
+                        # propre au type (pointer + unused) puis le paquet
+                        # fautif. Sans cette branche, un type 12 etait compte
+                        # dans l'en-tete puis oublie : « 1 ICMP » en haut,
+                        # « aucune erreur ICMP » deux lignes plus bas
+                        # (backlog 0.8.1).
+                        fautif = bytes(corps)[4:] if corps else b""
+                    ev = _extract_icmp_event(float(ts), ip, fautif,
                                              data.type, data.code)
                     if ev:
                         cap.icmp_events.append(ev)

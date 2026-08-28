@@ -98,10 +98,14 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     # resolution. Les ignorer en silence faisait affirmer « le serveur ne
     # repond pas » alors que sa reponse etait dans la capture.
     dns_orphelines: list = []
-    resolutions = build_resolutions(msgs, cap.t_last_seen, tcp53,
+    # `t_fin_fiable` et non t_last_seen : un paquet isole date des annees plus
+    # loin (horloge folle, captures concatenees) faisait calculer « aucune
+    # reponse en 31536000000 ms » ici, pendant que le rapport avertissait de
+    # l'aberration sans que l'etage DNS en tienne compte (backlog 0.8.1).
+    resolutions = build_resolutions(msgs, cap.t_fin_fiable, tcp53,
                                     orphelines=dns_orphelines)
     dns_verdicts = evaluate_dns(
-        [compute_dns_signals(r, cap.t_last_seen) for r in resolutions],
+        [compute_dns_signals(r, cap.t_fin_fiable) for r in resolutions],
         dns_rules, lang)
     dns_links = link_flows(
         resolutions,
@@ -124,9 +128,14 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     # machines : trois questions restees sans reponse sur un autre port
     # ephemere disparaissaient du rapport, avec un code retour 0 - alors que
     # le port 53 figure justement dans la liste des services qui repondent
-    # (revue du 16/08/2026).
-    couvert_par_dns = {(r.client, srv, port, r.attempts[0].sport)
-                       for r in resolutions if r.attempts
+    # (revue du 16/08/2026). Et TOUS les ports sources de la resolution, pas
+    # seulement celui de la premiere tentative : une reemission depuis un
+    # second socket laissait la conversation de ce socket non couverte, et
+    # l'etage UDP sortait un panneau AMBIGU redondant sur la meme panne
+    # (backlog 0.8.1).
+    couvert_par_dns = {(r.client, srv, port, a.sport)
+                       for r in resolutions
+                       for a in r.attempts
                        for srv in r.resolvers
                        for port in (53, MDNS_PORT)}
     udp_verdicts = evaluate_udp(
@@ -225,11 +234,19 @@ def cmd_analyze(args: argparse.Namespace) -> int:
         # rien apres sa fin ne peut expliquer ce qu'elle contient.
         timeline = timeline.window(cap.t_first, cap.t_last)
 
+    # UN seul rendu JSON, partage entre --json et --explain. Deux appels
+    # separes avaient deja diverge une fois : celui d'--explain omettait le
+    # compte d'orphelins, et la synthese narrative relisait un rapport
+    # different de celui affiche a l'utilisateur (backlog 0.8.1). Construit
+    # une fois, il ne peut plus diverger.
+    rapport_json = None
+    if args.json or args.explain:
+        rapport_json = to_json(cap, verdicts, snapshot, timeline, lang,
+                               dns_verdicts=dns_verdicts, dns_links=dns_links,
+                               udp_verdicts=udp_verdicts,
+                               dns_orphelines=len(dns_orphelines))
     if args.json:
-        print(to_json(cap, verdicts, snapshot, timeline, lang,
-                      dns_verdicts=dns_verdicts, dns_links=dns_links,
-                      udp_verdicts=udp_verdicts,
-                      dns_orphelines=len(dns_orphelines)))
+        print(rapport_json)
     else:
         render_console(cap, verdicts, snapshot, top=args.top,
                        timeline=timeline, lang=lang,
@@ -240,15 +257,11 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     if args.explain:
         from .explain import explain, ExplainUnavailable
         try:
-            # Le MEME rapport que celui rendu a l'utilisateur, etages DNS et
-            # UDP compris : sans eux, la synthese narrative expliquerait une
-            # capture dont elle ignore la resolution de nom qui a coute deux
-            # secondes - et elle le ferait avec aplomb.
-            print(explain(to_json(cap, verdicts, snapshot, timeline, lang,
-                                  dns_verdicts=dns_verdicts,
-                                  dns_links=dns_links,
-                                  udp_verdicts=udp_verdicts),
-                          lang))
+            # Le MEME rapport que celui rendu a l'utilisateur, etages DNS,
+            # UDP et orphelins compris : sans eux, la synthese narrative
+            # expliquerait une capture dont elle ignore une partie - et elle
+            # le ferait avec aplomb.
+            print(explain(rapport_json, lang))
             print()
         except ExplainUnavailable as e:
             print(t("explain.unavailable", lang, e=e), file=sys.stderr)
