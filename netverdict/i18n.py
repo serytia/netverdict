@@ -380,6 +380,18 @@ STRINGS: dict[str, dict[str, str]] = {
         "fr": "avant le flux",
         "en": "before the flow",
     },
+    # Reference explicite pour une rafale : elle a une duree propre, seul son
+    # DEBUT est compare au flux.
+    "correlate.before_first_packet": {
+        "fr": "avant le premier paquet du flux",
+        "en": "before the flow's first packet",
+    },
+    "correlate.burst_evidence": {
+        "fr": "rafale de {program} sur {host} : {lines} lignes en "
+              "{span:.0f} s, {when}",
+        "en": "burst from {program} on {host}: {lines} lines in "
+              "{span:.0f} s, {when}",
+    },
     "correlate.attr_side": {
         "fr": "{proc} cote {side}",
         "en": "{proc} on the {side} side",

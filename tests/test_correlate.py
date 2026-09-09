@@ -18,9 +18,11 @@ from __future__ import annotations
 
 import pytest
 
+from netverdict.burst import BurstEvent
 from netverdict.correlate import (MAX_SUSPECTS_PER_FLOW, STRONG_WINDOW_S,
-                                 correlate, suspects_for)
-from netverdict.timeline import SourceStats, Timeline, TimelineEvent
+                                 SUSPECT_CATEGORIES, correlate, suspects_for)
+from netverdict.timeline import (CHANGE_CATEGORIES, SourceStats, Timeline,
+                                 TimelineEvent)
 
 
 def _ev(ts, category="change", *, host="fw01", message="firewall rules reloaded",
@@ -283,3 +285,96 @@ def test_un_evenement_DANS_le_flux_prime_sur_un_plus_proche_mais_dehors():
     assert a.connection.pid == 2, (
         "un evenement hors du flux, mais plus proche, a ete prefere")
     assert a.within_flow is True
+
+
+class TestRafaleSuspecte:
+    """Une rafale de journaux (burst.py) est un SUSPECT, jamais un changement.
+
+    C'est le scenario d'origine : un serveur tombe apres une operation
+    planifiee, tout le monde accuse l'operation, et c'est une application
+    partie en boucle d'erreur qui l'a mis a terre. Encore faut-il que la
+    rafale remonte a cote du flux en panne, sans pour autant se faire passer
+    pour un changement d'infra.
+    """
+
+    @pytest.fixture
+    def flux_app(self, analyze):
+        """Un vrai verdict APP (RST sur SYN) issu d'un pcap synthetique."""
+        _sig, fv = analyze("rst_to_syn")
+        assert fv.verdict == "APP"
+        return fv
+
+    @staticmethod
+    def _rafale(ts, *, host="db01", ident="app", lines=900, span=60.0,
+                tz_known=True):
+        return BurstEvent(
+            ts=ts, source="syslog", host=host, category="burst", severity=2,
+            ident=ident,
+            message=f"{lines} lines in {span:.0f} s (peak {lines}/min, "
+                    f"baseline 5/min): ORA-00060: deadlock detected",
+            tz_known=tz_known, end=ts + span, lines=lines,
+            peak_per_min=lines, baseline_per_min=5,
+            sample="ORA-00060: deadlock detected")
+
+    def test_une_rafale_avant_le_flux_est_le_suspect_numero_un(self, flux_app):
+        """Verdict APP + rafale 90 s avant le premier paquet : c'est le suspect
+        a montrer en premier, avec ses chiffres. La preuve doit porter le
+        volume et la duree, en francais comme en anglais : « rafale » ne veut
+        pas dire la meme chose a 250 et a 9000 lignes."""
+        t = flux_app.signals.t_first
+        out = suspects_for(flux_app, _tl(self._rafale(t - 90)))
+        assert len(out) == 1
+        sp = out[0]
+        assert sp.event.category == "burst"
+        assert sp.affinity is True, "une rafale est plausible pour un verdict APP"
+        assert round(sp.delay_s) == 90
+        assert sp.during_flow is False
+
+        fr = sp.describe("fr")
+        assert fr == ("rafale de app sur db01 : 900 lignes en 60 s, "
+                      "90 s avant le premier paquet du flux")
+        en = sp.describe("en")
+        assert en == ("burst from app on db01: 900 lines in 60 s, "
+                      "90 s before the flow's first packet")
+
+    def test_un_flux_sain_ne_recoit_aucune_rafale(self, flux_sain):
+        """Propriete 2 de ce fichier, qui doit survivre a la nouvelle
+        categorie : un flux qui va bien ne recoit rien. Une application
+        bavarde a cote d'un flux irreprochable n'est pas un sujet."""
+        t = flux_sain.signals.t_first
+        assert suspects_for(flux_sain, _tl(self._rafale(t - 90))) == []
+
+    def test_une_rafale_hors_fenetre_est_absente(self, flux_app):
+        """La fenetre vaut pour la rafale comme pour un changement : au-dela,
+        le rattachement a CE flux n'est plus qu'une coincidence."""
+        t = flux_app.signals.t_first
+        loin = self._rafale(t - STRONG_WINDOW_S - 1)
+        assert suspects_for(flux_app, _tl(loin)) == []
+
+    def test_un_changement_de_meme_affinite_plus_proche_passe_devant(self, flux_app):
+        """Le tri existant ne change pas : a affinite egale, c'est la
+        proximite temporelle qui departage. La rafale ne recoit aucun
+        privilege du fait d'etre neuve, et elle reste affichee."""
+        t = flux_app.signals.t_first
+        proche = _ev(t - 10, "service", host="db01", ident="systemd",
+                     message="postgresql.service: main process exited")
+        out = suspects_for(flux_app, _tl(self._rafale(t - 90), proche))
+        assert [s.event.category for s in out] == ["service", "burst"]
+        assert [s.affinity for s in out] == [True, True]
+
+    def test_une_rafale_n_est_pas_un_changement_d_infra(self, flux_reseau):
+        """Deux non-comportements dans le meme verrou : `Timeline.changes()`
+        ignore la rafale (rien n'a change), et un verdict RESEAU ne lui donne
+        aucune affinite (un journal qui hurle ne perd pas de paquets sur le
+        chemin). Elle reste tout de meme affichee : on classe, on ne filtre
+        pas."""
+        assert "burst" not in CHANGE_CATEGORIES
+        assert "burst" in SUSPECT_CATEGORIES
+
+        t = flux_reseau.signals.t_first
+        tl = _tl(self._rafale(t - 30))
+        assert tl.changes() == []
+
+        out = suspects_for(flux_reseau, tl)
+        assert len(out) == 1
+        assert out[0].affinity is False

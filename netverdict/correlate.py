@@ -28,6 +28,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
+from .burst import BurstEvent
 from .i18n import DEFAULT_LANG, t
 from .rules.engine import FlowVerdict
 from .timeline import CHANGE_CATEGORIES, Timeline, TimelineEvent
@@ -43,6 +44,15 @@ STRONG_WINDOW_S = 300.0
 # globale de la timeline reste la pour tout voir.
 MAX_SUSPECTS_PER_FLOW = 3
 
+# Categories qui peuvent devenir SUSPECTES pour un flux. Sur-ensemble strict de
+# CHANGE_CATEGORIES, et les deux ensembles doivent le rester : une rafale de
+# journaux n'est PAS un changement d'infra (rien n'a change, une application
+# s'est mise a hurler), donc elle n'a rien a faire dans Timeline.changes(), qui
+# repond a « qu'est-ce qui a change ». Elle a en revanche tout a faire ici :
+# c'est exactement l'observation que l'admin cherche quand un serveur tombe
+# apres une operation planifiee et que tout le monde accuse l'operation.
+SUSPECT_CATEGORIES = CHANGE_CATEGORIES | {"burst"}
+
 # Affinite categorie de changement <-> verdict : quel type de changement peut
 # PLAUSIBLEMENT produire ce type de panne. Sert uniquement a classer, jamais a
 # exclure. Chaque ligne encode un raisonnement d'expert, pas une statistique.
@@ -50,15 +60,25 @@ _AFFINITY: dict[str, set[str]] = {
     # Paquets perdus, SYN sans reponse, ICMP de rejet : un changement de lien,
     # d'adressage ou de regle de filtrage est le suspect naturel. Un hote qui
     # redemarre explique aussi un SYN sans reponse.
+    #
+    # PAS de "burst" ici, et c'est le coeur de la fonctionnalite : une
+    # application qui hurle dans son journal ne fait pas perdre des paquets sur
+    # le chemin. Lui donner une affinite RESEAU la ferait remonter en tete du
+    # panneau exactement quand elle est hors de cause, et l'outil existe pour
+    # eviter ce genre d'accusation. Elle reste affichee, plus bas : on classe,
+    # on ne filtre pas.
     "RESEAU": {"network", "change", "reboot"},
     # Rien n'ecoute sur le port, ou reponse applicative lente : un service qui
     # vient de tomber/redemarrer, un paquet mis a jour, un hote pas encore
-    # remonte.
-    "APP": {"service", "change", "reboot"},
+    # remonte. Une rafale de journaux est le meme process vu par l'autre bout :
+    # une application partie en boucle d'erreur ne repond plus a temps.
+    "APP": {"service", "change", "reboot", "burst"},
     # L'application ne lit plus sa socket (zero window) : bascule sur batterie
-    # (CPU bride), service en difficulte, changement de configuration.
-    "OS": {"power", "service", "change"},
-    "HOTE": {"power", "service", "change"},
+    # (CPU bride), service en difficulte, changement de configuration. Une
+    # rafale sature le disque, le collecteur ou le CPU : c'est le mecanisme
+    # classique par lequel un journal emballe met une machine a genoux.
+    "OS": {"power", "service", "change", "burst"},
+    "HOTE": {"power", "service", "change", "burst"},
     # AMBIGU l'est par construction : afficher une affinite donnerait une
     # fausse impression de piste. Aucune categorie privilegiee.
     "AMBIGU": set(),
@@ -83,24 +103,44 @@ class Suspect:
     def describe(self, lang: str = DEFAULT_LANG) -> str:
         """Une ligne pour le rapport. Sur un horodatage sans fuseau fiable
         (RFC3164 sans --syslog-tz), pas de precision a la seconde : afficher
-        un chiffre qu'on n'a pas serait mentir."""
+        un chiffre qu'on n'a pas serait mentir.
+
+        Une rafale porte en plus son volume et sa duree : « rafale » ne veut
+        pas dire la meme chose a 250 et a 9000 lignes, et sans ces deux
+        chiffres l'admin doit aller relire le message brut pour juger.
+        """
+        rafale = isinstance(self.event, BurstEvent)
         ecart = abs(self.delay_s)
         if self.event.tz_known:
             quand = t("correlate.seconds", lang, n=ecart)
         else:
             quand = t("correlate.minutes_approx", lang,
                       n=max(1, round(ecart / 60)))
-        position = t("correlate.during_flow" if self.during_flow
-                     else "correlate.before_flow", lang)
-        return f"{quand} {position}"
+        # Pour une rafale, on nomme l'instant de reference : elle a une duree
+        # propre, donc « avant le flux » tout court laisserait croire que la
+        # rafale entiere precede le flux alors que seul son DEBUT est date.
+        if self.during_flow:
+            position = t("correlate.during_flow", lang)
+        else:
+            position = t("correlate.before_first_packet" if rafale
+                         else "correlate.before_flow", lang)
+        ligne = f"{quand} {position}"
+        if not rafale:
+            return ligne
+        b = self.event
+        assert isinstance(b, BurstEvent)          # garanti par `rafale`
+        return t("correlate.burst_evidence", lang, program=b.ident,
+                 host=b.host, lines=b.lines, span=max(0.0, b.end - b.ts),
+                 when=ligne)
 
 
 def suspects_for(fv: FlowVerdict, timeline: Timeline,
                  window_s: float = STRONG_WINDOW_S,
                  limit: int = MAX_SUSPECTS_PER_FLOW) -> list[Suspect]:
-    """Changements d'infra a verifier pour ce flux, du plus pertinent au moins.
+    """Evenements a verifier pour ce flux, du plus pertinent au moins.
 
-    Candidats : les changements survenus dans [t_first - window_s, fin du flux].
+    Candidats : les evenements de SUSPECT_CATEGORIES (changements d'infra plus
+    rafales de journaux) survenus dans [t_first - window_s, fin du flux].
     On inclut ce qui se produit PENDANT le flux parce qu'un RST en pleine
     session ou une chute de debit peut avoir ete cause par un changement
     posterieur au premier paquet — l'instant de l'anomalie nous est inconnu.
@@ -124,7 +164,7 @@ def suspects_for(fv: FlowVerdict, timeline: Timeline,
 
     out: list[Suspect] = []
     for e in timeline.events:
-        if e.category not in CHANGE_CATEGORIES:
+        if e.category not in SUSPECT_CATEGORIES:
             continue
         if not (t_first - window_s <= e.ts <= t_end):
             continue
