@@ -124,8 +124,13 @@ def render_timeline(tl: Timeline, incident_ts: Optional[float],
     # O(n) par categorie — jamais de comparaison d'objets sur les listes
     # completes (quadratique sur un gros syslog central).
     from .timeline import CHANGE_CATEGORIES
+    # « burst » est exclu du compte : une rafale a sa propre section juste en
+    # dessous, et elle n'est pas une erreur LUE dans la source mais un resume
+    # calcule a partir de lignes deja comptees ici. L'inclure ferait compter
+    # deux fois le meme fait.
     errors = sum(1 for e in tl.events
-                 if e.category not in CHANGE_CATEGORIES and e.severity >= 2)
+                 if e.category not in CHANGE_CATEGORIES
+                 and e.category != "burst" and e.severity >= 2)
     if errors:
         con.print(Text("  " + t("timeline.other_errors", lang, n=errors),
                        style="dim"))
@@ -139,6 +144,48 @@ def render_timeline(tl: Timeline, incident_ts: Optional[float],
             # Avertissement actionnable du parseur : en evidence, pas en dim —
             # c'est la difference entre une capacite inerte et une absente.
             con.print(Text(f"  {name}: {st.note}", style="bold yellow"))
+    con.print()
+
+
+def bursts_of(tl: Optional[Timeline]) -> list:
+    """Les rafales portees par une timeline, les plus grosses d'abord.
+
+    Le tri est par NOMBRE DE LIGNES et non par date : entre une rafale de 900
+    lignes et une de 210, c'est la premiere qui explique la panne, meme si elle
+    est plus ancienne. La date reste dans chaque ligne affichee.
+    """
+    from .burst import BurstEvent
+    if tl is None:
+        return []
+    return sorted((e for e in tl.events if isinstance(e, BurstEvent)),
+                  key=lambda e: (-e.lines, e.ts))
+
+
+def render_bursts(tl: Timeline, con: Console, top: int = 10,
+                  lang: str = DEFAULT_LANG) -> None:
+    """Section « rafales de journaux », apres la timeline.
+
+    Muette quand il n'y a rien : une rafale est un fait remarquable, son
+    absence est le cas normal. C'est l'inverse du choix fait pour la timeline,
+    et pour la raison inverse — la, l'admin a fourni des logs et attend une
+    reponse ; ici, il n'a rien demande.
+    """
+    rafales = bursts_of(tl)
+    if not rafales:
+        return
+    con.print(Text(t("report.bursts_header", lang), style="bold"))
+    for b in rafales[:top]:
+        line = Text()
+        line.append(f"  {_fmt_ts(b.ts, b.tz_known)}  ")
+        line.append(t("report.burst_line", lang, host=b.host, program=b.ident,
+                      lines=b.lines, span=b.end - b.ts, peak=b.peak_per_min,
+                      base=b.baseline_per_min), style="bold yellow")
+        if b.sample:
+            line.append(f"  {b.sample}", style="dim")
+        con.print(line)
+    if len(rafales) > top:
+        con.print(Text("  " + t("report.more_bursts", lang,
+                                n=len(rafales) - top), style="dim"))
     con.print()
 
 
@@ -450,6 +497,7 @@ def render_console(cap: Capture, verdicts: list[FlowVerdict],
         con.print()
         render_timeline(timeline, incident_ts, con,
                         windowed=timeline.windowed, top=top, lang=lang)
+        render_bursts(timeline, con, top=top, lang=lang)
 
     hidden = sum(1 for fv in ordered
                  if fv.primary and fv.verdict != "RAS") - shown
@@ -606,7 +654,24 @@ def to_json(cap: Capture, verdicts: list[FlowVerdict],
                 "tz_known": e.tz_known,
             } for e in timeline.events],
             "stats": {k: {"total_lines": v.total_lines, "parsed": v.parsed,
-                          "unparsed": v.unparsed, "note": v.note}
+                          "unparsed": v.unparsed, "bursts": v.bursts,
+                          "note": v.note}
                       for k, v in timeline.stats.items()},
         }
+        # Cle TOUJOURS presente des qu'une timeline existe, liste vide comprise :
+        # un consommateur machine doit pouvoir distinguer « aucune rafale » de
+        # « cette version ne sait pas les detecter ». Les rafales restent aussi
+        # dans timeline.events (ce sont des TimelineEvent) ; ici, le detail
+        # chiffre qu'un evenement generique ne peut pas porter.
+        out["bursts"] = [{
+            "host": b.host,
+            "program": b.ident,
+            "start": b.ts,
+            "end": b.end,
+            "lines": b.lines,
+            "peak_per_min": b.peak_per_min,
+            "baseline_per_min": b.baseline_per_min,
+            "sample": b.sample,
+            "tz_known": b.tz_known,
+        } for b in bursts_of(timeline)]
     return json.dumps(out, indent=2, ensure_ascii=False)
