@@ -221,7 +221,15 @@ def cmd_analyze(args: argparse.Namespace) -> int:
             except (ValueError, OSError) as e:
                 print(f"--syslog {path}: {e}", file=sys.stderr)
                 return 2
-            timeline.add_source(f"syslog:{Path(path).name}", evs, st)
+            # Rafales : detectees ICI et non dans syslog.parse(), qui doit
+            # rester un pur etage decoder (contrat de timeline.py) et dont les
+            # stats comptent des LIGNES lues, pas des evenements synthetises.
+            # Detectees par FICHIER : deux syslog centraux differents n'ont
+            # aucune raison de melanger leurs rythmes de reference.
+            from .burst import detect_bursts
+            rafales = detect_bursts(evs)
+            st.bursts = len(rafales)
+            timeline.add_source(f"syslog:{Path(path).name}", evs + rafales, st)
         for path in args.audit:
             from .sources import auditd
             try:

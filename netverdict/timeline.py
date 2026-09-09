@@ -61,6 +61,12 @@ CATEGORIES = {
     "service",   # cycle de vie process/service : start/stop/crash/restart
     "reboot",    # demarrage/arret de l'hote entier
     "error",     # erreur signalee par la source, sans categorie plus fine
+    "burst",     # rafale de journaux : un couple (hote, programme) qui ecrit
+                 # des centaines de lignes par minute (burst.py). C'est une
+                 # OBSERVATION synthetique, pas une ligne lue ni un changement
+                 # d'infra — elle reste donc hors de CHANGE_CATEGORIES, sinon
+                 # chaque application bavarde apparaitrait dans « ce qui a
+                 # change » alors que rien n'a change.
     "info",      # le reste — garde pour le contexte, jamais mis en avant
 }
 
@@ -169,6 +175,10 @@ class SourceStats:
     total_lines: int = 0          # lignes/records rencontres
     parsed: int = 0               # convertis en TimelineEvent
     unparsed: int = 0             # illisibles (comptes, jamais fatals)
+    # Rafales SYNTHETISEES a partir des lignes lues (burst.py) : jamais
+    # comptees dans parsed, qui reste le compte de ce que la source a
+    # reellement ecrit. Deux mesures differentes, deux compteurs.
+    bursts: int = 0
     # Avertissement actionnable du parseur (ex : « Sysmon sans NetworkConnect,
     # la jointure process<->flux ne peut pas fonctionner — activer via ... »).
     # Le rapport l'affiche en evidence : une capacite silencieusement inerte

@@ -344,6 +344,25 @@ STRINGS: dict[str, dict[str, str]] = {
         "en": ", {n} unreadable",
     },
 
+    # ------------------------------------------------------ report.py/burst
+    # Section affichee UNIQUEMENT quand une rafale a ete detectee : contrairement
+    # a la timeline, son absence n'est pas une information (aucune rafale est le
+    # cas normal), et une section vide de plus noierait celles qui parlent.
+    "report.bursts_header": {
+        "fr": "Rafales de journaux :",
+        "en": "Log bursts:",
+    },
+    "report.burst_line": {
+        "fr": "{host} — {program} : {lines} lignes en {span:.0f} s "
+              "(pic {peak}/min, base {base}/min)",
+        "en": "{host} — {program}: {lines} lines in {span:.0f} s "
+              "(peak {peak}/min, baseline {base}/min)",
+    },
+    "report.more_bursts": {
+        "fr": "... {n} autre(s) rafale(s) masquee(s) — --top pour en voir plus",
+        "en": "... {n} more burst(s) hidden — use --top to see more",
+    },
+
     # ---------------------------------------------------------- correlate.py
     "correlate.seconds": {
         "fr": "{n:.0f} s",
