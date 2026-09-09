@@ -363,6 +363,33 @@ STRINGS: dict[str, dict[str, str]] = {
         "en": "... {n} more burst(s) hidden — use --top to see more",
     },
 
+    # ------------------------------------------------------ report.py/scan
+    # Meme regle que les rafales : section muette quand il n'y a rien. Un scan
+    # est un fait remarquable, son absence est le cas normal.
+    "report.scans_header": {
+        "fr": "Balayages de ports :",
+        "en": "Port scan windows:",
+    },
+    "report.scan_line": {
+        "fr": "{client} -> {server} : {ports} ports en {span:.0f} s",
+        "en": "{client} -> {server}: {ports} ports in {span:.0f} s",
+    },
+    "report.more_scans": {
+        "fr": "... {n} autre(s) balayage(s) masque(s) — --top pour en voir plus",
+        "en": "... {n} more scan(s) hidden — use --top to see more",
+    },
+    # LA phrase qui tranche : elle place le scan et la rafale l'un par rapport
+    # a l'autre. Sans elle, le rapport affiche deux faits cote a cote et laisse
+    # l'admin faire le rapprochement — c'est-a-dire accuser le scan.
+    "report.scan_before_burst": {
+        "fr": "le scan s'est termine {d:.0f} s avant le debut de la rafale",
+        "en": "the scan ended {d:.0f} s before the burst started",
+    },
+    "report.burst_during_scan": {
+        "fr": "la rafale a commence pendant le scan",
+        "en": "the burst started while the scan was running",
+    },
+
     # ---------------------------------------------------------- correlate.py
     "correlate.seconds": {
         "fr": "{n:.0f} s",

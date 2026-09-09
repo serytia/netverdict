@@ -362,6 +362,23 @@ class TestRafaleSuspecte:
         assert [s.event.category for s in out] == ["service", "burst"]
         assert [s.affinity for s in out] == [True, True]
 
+    def test_la_rafale_passe_devant_quand_elle_est_la_plus_proche(self, flux_app):
+        """Le VERROU MANQUANT du test precedent, et il compte autant que lui.
+
+        Le tri n'etait teste que dans un sens : « un changement plus proche
+        passe devant la rafale ». Un tri qui reculerait systematiquement les
+        rafales (un `not isinstance(...)` glisse dans la cle, une categorie
+        traitee a part) passait cet unique test au vert tout en enterrant la
+        rafale a chaque fois — c'est-a-dire en supprimant en silence la
+        fonctionnalite entiere, dans le seul cas ou elle sert : quand c'est
+        elle, la piste. Symetrie exigee (relecture Argus, 09/09/2026)."""
+        t = flux_app.signals.t_first
+        loin = _ev(t - 90, "service", host="db01", ident="systemd",
+                   message="postgresql.service: main process exited")
+        out = suspects_for(flux_app, _tl(self._rafale(t - 10), loin))
+        assert [s.event.category for s in out] == ["burst", "service"]
+        assert [s.affinity for s in out] == [True, True]
+
     def test_une_rafale_n_est_pas_un_changement_d_infra(self, flux_reseau):
         """Deux non-comportements dans le meme verrou : `Timeline.changes()`
         ignore la rafale (rien n'a change), et un verdict RESEAU ne lui donne

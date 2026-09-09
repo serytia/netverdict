@@ -189,6 +189,74 @@ def render_bursts(tl: Timeline, con: Console, top: int = 10,
     con.print()
 
 
+def scans_of(tl: Optional[Timeline]) -> list:
+    """Les fenetres de scan portees par une timeline, la plus large d'abord.
+
+    Tri par NOMBRE DE PORTS puis par date, meme raison que pour les rafales :
+    entre un balayage de 4000 ports et un de 31, c'est le premier qui compte,
+    meme s'il est plus ancien.
+    """
+    from .flows import ScanEvent
+    if tl is None:
+        return []
+    return sorted((e for e in tl.events if isinstance(e, ScanEvent)),
+                  key=lambda e: (-e.ports, e.ts))
+
+
+def scan_burst_summary(tl: Optional[Timeline],
+                       lang: str = DEFAULT_LANG) -> Optional[str]:
+    """LA phrase qui tranche, quand un scan et une rafale coexistent.
+
+    C'est le coeur du chantier : un serveur tombe apres un scan, tout le monde
+    accuse le scan, et les journaux montrent une application partie en boucle
+    d'erreur. Les deux faits cote a cote ne suffisent pas — il faut les placer
+    l'un par rapport a l'autre, et c'est le SEUL endroit du rapport qui le fait.
+
+    On compare la plus grosse rafale au scan qui en est temporellement le plus
+    proche. None quand il manque l'un des deux, ou quand la rafale precede
+    entierement le scan : aucune des deux phrases ne serait vraie, et une phrase
+    fausse ici couterait plus cher que le silence.
+    """
+    rafales, balayages = bursts_of(tl), scans_of(tl)
+    if not rafales or not balayages:
+        return None
+    b = rafales[0]
+    s = min(balayages, key=lambda e: abs(b.ts - e.end))
+    if s.ts <= b.ts <= s.end:
+        return t("report.burst_during_scan", lang)
+    if s.end < b.ts:
+        return t("report.scan_before_burst", lang, d=b.ts - s.end)
+    return None
+
+
+def render_scans(tl: Timeline, con: Console, top: int = 10,
+                 lang: str = DEFAULT_LANG) -> None:
+    """Section « balayages de ports », apres les rafales.
+
+    Muette quand il n'y a rien, comme les rafales. La ligne de synthese, elle,
+    ne sort que si les DEUX faits sont la : c'est une comparaison, pas une
+    observation.
+    """
+    balayages = scans_of(tl)
+    if not balayages:
+        return
+    con.print(Text(t("report.scans_header", lang), style="bold"))
+    for s in balayages[:top]:
+        line = Text()
+        line.append(f"  {_fmt_ts(s.ts, s.tz_known)}  ")
+        line.append(t("report.scan_line", lang, client=s.client,
+                      server=s.server, ports=s.ports, span=s.end - s.ts),
+                    style="bold yellow")
+        con.print(line)
+    if len(balayages) > top:
+        con.print(Text("  " + t("report.more_scans", lang,
+                                n=len(balayages) - top), style="dim"))
+    synthese = scan_burst_summary(tl, lang)
+    if synthese:
+        con.print(Text("  " + synthese, style="bold cyan"))
+    con.print()
+
+
 def render_console(cap: Capture, verdicts: list[FlowVerdict],
                    snapshot: Optional[HostSnapshot] = None,
                    top: int = 10, console: Optional[Console] = None,
@@ -498,6 +566,7 @@ def render_console(cap: Capture, verdicts: list[FlowVerdict],
         render_timeline(timeline, incident_ts, con,
                         windowed=timeline.windowed, top=top, lang=lang)
         render_bursts(timeline, con, top=top, lang=lang)
+        render_scans(timeline, con, top=top, lang=lang)
 
     hidden = sum(1 for fv in ordered
                  if fv.primary and fv.verdict != "RAS") - shown
@@ -674,4 +743,19 @@ def to_json(cap: Capture, verdicts: list[FlowVerdict],
             "sample": b.sample,
             "tz_known": b.tz_known,
         } for b in bursts_of(timeline)]
+        # Meme contrat que "bursts" : cle TOUJOURS presente des qu'une timeline
+        # existe, liste vide comprise. `end` est expose parce que c'est LUI qui
+        # dedouane — sans la fin du balayage, un consommateur machine ne peut
+        # pas dire s'il etait termine quand les ennuis ont commence.
+        out["scans"] = [{
+            "client": s.client,
+            "server": s.server,
+            "start": s.ts,
+            "end": s.end,
+            "ports": s.ports,
+        } for s in scans_of(timeline)]
+        # La phrase qui tranche, en clair dans le JSON : --explain relit ce
+        # rapport, et sans elle il refait le rapprochement a sa facon.
+        if (synthese := scan_burst_summary(timeline, lang)) is not None:
+            out["scan_burst_summary"] = synthese
     return json.dumps(out, indent=2, ensure_ascii=False)

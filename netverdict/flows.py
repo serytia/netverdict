@@ -7,12 +7,14 @@ cote serveur" et "zero window cote client" menent a des verdicts opposes.
 
 from __future__ import annotations
 
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Iterable, Optional
 
 import dpkt
 
 from .pcap import Capture, IcmpEvent, TcpPkt
+from .timeline import TimelineEvent
 
 # En dessous de ce delta, deux segments identiques (meme seq/len/ip_id) sont
 # un doublon de capture (le sniffer a vu la meme trame deux fois, classique
@@ -168,3 +170,156 @@ def build_flows(cap: Capture) -> list[Flow]:
             min(candidats, key=lambda f: _ecart_temporel(f, ev.ts)).icmp.append(ev)
 
     return flows
+
+
+# ---------------------------------------------------------------------------
+# Fenetre de scan : le "qui a balaye qui, et quand"
+#
+# Une machine qui tombe apres un scan de vulnerabilites fait accuser le scan.
+# Pour DEDOUANER ou ACCUSER, il faut d'abord la fenetre exacte du balayage :
+# c'est ce que ce bloc calcule, et rien de plus. Il ne conclut pas (c'est
+# correlate.py) et ne juge aucun flux (c'est le moteur de regles) — meme
+# discipline que partout ailleurs : l'etage qui mesure ne conclut jamais.
+# ---------------------------------------------------------------------------
+
+# 30 ports distincts : un client legitime en contacte une poignee sur un meme
+# serveur (web + api + metriques font 3 ou 4) ; passe 30, on n'est plus dans
+# l'usage, on est dans l'enumeration. Le seuil est volontairement bien au-dessus
+# de ce qu'un client bavard atteint, parce que le cout d'un faux "scan" est
+# eleve : c'est exactement l'accusation que cet outil existe pour arbitrer.
+SCAN_MIN_PORTS = 30
+# 120 s : un balayage TCP outille fait ses centaines de ports en quelques
+# secondes. Etaler 30 ports sur plus de deux minutes, c'est le rythme d'un
+# superviseur qui teste une liste de services, pas d'un scanner.
+SCAN_WINDOW_S = 120.0
+
+
+@dataclass
+class ScanEvent(TimelineEvent):
+    """Une fenetre de scan, vue comme un TimelineEvent (contrat timeline.py).
+
+    Meme choix de sous-typage que BurstEvent : la fenetre voyage dans
+    `Timeline.events` comme n'importe quel evenement — la correlation, le tri
+    et le fenetrage n'apprennent pas un type de plus. Les consommateurs qui
+    veulent le detail chiffre testent `isinstance`.
+
+    end   : dernier SYN de la fenetre (epoch, UTC), donc `end - ts` = duree.
+    ports : nombre de ports DISTINCTS vises.
+    """
+
+    end: float = 0.0
+    ports: int = 0
+    client: str = ""
+    server: str = ""
+
+
+def _est_sonde(p: TcpPkt) -> bool:
+    """SYN pur sans donnee : la seule forme qu'on accepte de compter.
+
+    Un SYN+ACK est une REPONSE et un SYN portant des donnees (TCP Fast Open)
+    est une connexion qui travaille : ni l'un ni l'autre n'est un coup de sonde.
+    """
+    return p.syn and not p.ack_flag and p.payload_len == 0
+
+
+def detect_scans(flows: Iterable[Flow], min_ports: int = SCAN_MIN_PORTS,
+                 window_s: float = SCAN_WINDOW_S) -> list[TimelineEvent]:
+    """Fenetres de balayage de ports presentes dans une capture.
+
+    Un scan = un MEME client qui sonde au moins `min_ports` ports DISTINCTS
+    d'un MEME serveur en `window_s` secondes au plus, avec une majorite de SYN
+    sans donnees. Les trois conditions ensemble, jamais l'une seule :
+
+      - meme couple (client, serveur) : 40 ports repartis sur 40 serveurs est
+        une carte du reseau, pas le balayage d'une machine — et ce n'est pas la
+        question posee ici (« ce serveur a-t-il ete scanne avant de tomber ? ») ;
+      - ports distincts : 40 connexions vers le port 443 d'un serveur web sont
+        un client normal, meme si elles sont simultanees ;
+      - majorite de SYN sans donnees : 40 connexions ETABLIES qui echangent des
+        octets sont un client qui travaille. Un scanner ouvre et abandonne.
+
+    Retourne les fenetres triees par date, une par salve de sondes chainees :
+    un balayage de 300 s reste UN evenement, sinon « le scan » deviendrait un
+    artefact du decoupage et le rapport en compterait trois pour un.
+    """
+    if min_ports <= 0 or window_s < 0:
+        raise ValueError(f"min_ports must be > 0 and window_s >= 0 "
+                         f"(got {min_ports}, {window_s})")
+
+    # Par couple (client, serveur) : les sondes d'un cote, TOUS les paquets du
+    # client de l'autre. Le second compte sert a juger « majoritairement des
+    # SYN sans donnees » sur la fenetre retenue, pas sur la capture entiere.
+    sondes: dict[tuple[str, str], list[tuple[float, int]]] = defaultdict(list)
+    emis: dict[tuple[str, str], list[float]] = defaultdict(list)
+    for fl in flows:
+        cle = (fl.client, fl.server)
+        for op in fl.pkts:
+            if not op.from_client:
+                continue
+            emis[cle].append(op.pkt.ts)
+            if _est_sonde(op.pkt):
+                sondes[cle].append((op.pkt.ts, fl.sport))
+
+    out: list[TimelineEvent] = []
+    for (client, server), pts in sondes.items():
+        pts.sort()
+        dates = sorted(emis[(client, server)])
+        # Deux pointeurs : la fenetre glissante [g, d] ne garde que les sondes
+        # a moins de window_s l'une de l'autre. Un Counter suit le nombre de
+        # ports DISTINCTS dedans sans le recalculer a chaque pas.
+        vus: Counter = Counter()
+        g = 0
+        chaudes: list[tuple[int, int]] = []
+        for d, (ts, port) in enumerate(pts):
+            vus[port] += 1
+            while pts[g][0] < ts - window_s:
+                vus[pts[g][1]] -= 1
+                if not vus[pts[g][1]]:
+                    del vus[pts[g][1]]
+                g += 1
+            if len(vus) >= min_ports:
+                chaudes.append((g, d))
+
+        # Fusion des fenetres qui se recouvrent : un balayage plus long que
+        # window_s en produit une par sonde, et c'est le MEME scan.
+        groupes: list[list[int]] = []
+        for g0, d0 in chaudes:
+            if groupes and g0 <= groupes[-1][1]:
+                groupes[-1][1] = d0
+            else:
+                groupes.append([g0, d0])
+
+        for g0, d0 in groupes:
+            fenetre = pts[g0:d0 + 1]
+            debut, fin = fenetre[0][0], fenetre[-1][0]
+            ports = len({p for _ts, p in fenetre})
+            # « Majoritairement des SYN sans donnees » : sur la fenetre, les
+            # sondes doivent etre la MAJORITE STRICTE de ce que le client a
+            # emis vers ce serveur. Une session etablie emet un ACK puis des
+            # donnees pour un seul SYN : elle est mecaniquement minoritaire.
+            envoyes = sum(1 for ts in dates if debut <= ts <= fin)
+            if len(fenetre) * 2 <= envoyes:
+                continue
+            out.append(ScanEvent(
+                ts=debut,
+                # La capture est la source : ses horodatages sont des epochs
+                # absolus, jamais une heure locale a deviner (d'ou tz_known).
+                source="pcap",
+                # L'hote du rapport est la CIBLE : c'est la machine dont
+                # l'admin cherche a savoir ce qui lui est arrive.
+                host=server,
+                category="scan",
+                # 2 = "erreur" sur l'echelle du projet : a lire avant les
+                # infos, jamais avant un crash machine.
+                severity=2,
+                ident=client,
+                message=(f"port scan from {client} to {server}: "
+                         f"{ports} ports in {fin - debut:.0f} s"),
+                end=fin,
+                ports=ports,
+                client=client,
+                server=server,
+            ))
+
+    out.sort(key=lambda e: (e.ts, e.host, e.ident))
+    return out

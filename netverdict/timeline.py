@@ -67,6 +67,13 @@ CATEGORIES = {
                  # d'infra — elle reste donc hors de CHANGE_CATEGORIES, sinon
                  # chaque application bavarde apparaitrait dans « ce qui a
                  # change » alors que rien n'a change.
+    "scan",      # fenetre de balayage de ports lue DANS LA CAPTURE
+                 # (flows.py) : un client qui sonde des dizaines de ports d'un
+                 # meme serveur. Comme la rafale, c'est une OBSERVATION et non
+                 # un changement d'infra — hors de CHANGE_CATEGORIES. Sa raison
+                 # d'etre est de pouvoir DEDOUANER : sans la fenetre exacte du
+                 # scan, on ne peut pas dire qu'il s'est termine avant le debut
+                 # des ennuis.
     "info",      # le reste — garde pour le contexte, jamais mis en avant
 }
 
