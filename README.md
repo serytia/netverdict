@@ -398,6 +398,32 @@ Rules live in `netverdict/rules/dns.yaml`. Your own `--rules` file can hold
 both kinds: a rule is routed by its `scope` field (`flow` by default), so a
 DNS rule never gets evaluated against a TCP flow by accident.
 
+## Log bursts and scan windows
+
+A server goes down minutes after a vulnerability scan. Everyone blames the scan.
+The logs show an application in an SQL error loop writing ~900 lines a minute:
+that is what took it down. netverdict reads both facts and, crucially, places
+them relative to each other:
+
+```
+netverdict analyze loss.pcap --syslog central.log --syslog-tz UTC
+```
+
+* **Log bursts** (`--syslog`): a `(host, program)` pair writing at least 200
+  lines a minute, and at least 20x its own baseline. Reported with its volume,
+  its span, its peak and the line that repeats.
+* **Scan windows** (read from the capture alone, no options needed): one client
+  probing 30 or more distinct ports of the same server within 120 seconds, mostly
+  SYNs with no data. Reported with its **start and end** — the end is what
+  clears a scan, and it is in the JSON too (`scans[].end`).
+* When both are present, one line settles it: *"the scan ended 180 s before the
+  burst started"* or *"the burst started while the scan was running"*.
+
+Neither is a verdict. Both are suspects attached to the flows they could plausibly
+explain, and a scan that ended before the trouble started is exactly what the
+report is for. To replay the demo with a burst in the corpus:
+`python lab/gen_syslog_corpus.py --burst app-billing:900:-180` (off by default).
+
 ## License
 
 GPL-2.0

@@ -238,6 +238,24 @@ def cmd_analyze(args: argparse.Namespace) -> int:
                 print(f"--audit {path}: {e}", file=sys.stderr)
                 return 2
             timeline.add_source(f"audit:{Path(path).name}", evs, st)
+    # Balayages de ports : lus dans la CAPTURE, donc disponibles meme sans
+    # aucune source de journaux. Quand il y en a un et qu'aucune source n'a ete
+    # fournie, on cree la timeline pour lui : taire un scan present dans le
+    # pcap parce que l'admin n'a pas passe --syslog serait exactement la panne
+    # muette que cet outil traque.
+    from .flows import detect_scans
+    from .timeline import Timeline
+    balayages = detect_scans(flows)
+    if balayages:
+        if timeline is None:
+            timeline = Timeline()
+        # Pas de add_source : la capture n'est pas une SOURCE de journaux, ses
+        # paquets sont deja comptes dans cap.stats. Lui inventer un SourceStats
+        # ferait afficher « 0 entrees lues sur 0 » sous la timeline, c'est-a-dire
+        # une ligne de comptabilite fausse a cote d'un fait vrai.
+        timeline.events.extend(balayages)
+        timeline.events.sort(key=lambda e: e.ts)
+    if timeline is not None:
         # Fenetre : les changements des 15 min qui precedent la capture ;
         # rien apres sa fin ne peut expliquer ce qu'elle contient.
         timeline = timeline.window(cap.t_first, cap.t_last)

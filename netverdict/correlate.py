@@ -51,7 +51,11 @@ MAX_SUSPECTS_PER_FLOW = 3
 # repond a « qu'est-ce qui a change ». Elle a en revanche tout a faire ici :
 # c'est exactement l'observation que l'admin cherche quand un serveur tombe
 # apres une operation planifiee et que tout le monde accuse l'operation.
-SUSPECT_CATEGORIES = CHANGE_CATEGORIES | {"burst"}
+# « scan » entre ici pour la meme raison et avec la meme reserve : une fenetre
+# de balayage n'est pas un changement d'infra, mais c'est le suspect que tout le
+# monde designe en premier quand un serveur tombe. L'afficher AVEC sa fenetre
+# exacte est la seule facon de le dedouaner quand il est hors de cause.
+SUSPECT_CATEGORIES = CHANGE_CATEGORIES | {"burst", "scan"}
 
 # Affinite categorie de changement <-> verdict : quel type de changement peut
 # PLAUSIBLEMENT produire ce type de panne. Sert uniquement a classer, jamais a
@@ -67,12 +71,22 @@ _AFFINITY: dict[str, set[str]] = {
     # panneau exactement quand elle est hors de cause, et l'outil existe pour
     # eviter ce genre d'accusation. Elle reste affichee, plus bas : on classe,
     # on ne filtre pas.
-    "RESEAU": {"network", "change", "reboot"},
+    #
+    # "scan" en revanche EST plausible ici, et c'est le seul endroit ou une
+    # observation de la capture peut expliquer une panne de transport : des
+    # centaines de SYN font saturer une table de conntrack ou declencher un
+    # blocage automatique cote firewall, et le SYN sans reponse qui suit
+    # ressemble alors trait pour trait a une perte reseau.
+    "RESEAU": {"network", "change", "reboot", "scan"},
     # Rien n'ecoute sur le port, ou reponse applicative lente : un service qui
     # vient de tomber/redemarrer, un paquet mis a jour, un hote pas encore
     # remonte. Une rafale de journaux est le meme process vu par l'autre bout :
     # une application partie en boucle d'erreur ne repond plus a temps.
-    "APP": {"service", "change", "reboot", "burst"},
+    # Le scan y figure aussi : un balayage ouvre des centaines de sockets sur
+    # le service et epuise son pool de connexions, ce qui se lit comme une
+    # application lente. Il reste un SUSPECT, pas une cause — c'est justement
+    # la confusion que le rapport doit permettre de trancher.
+    "APP": {"service", "change", "reboot", "burst", "scan"},
     # L'application ne lit plus sa socket (zero window) : bascule sur batterie
     # (CPU bride), service en difficulte, changement de configuration. Une
     # rafale sature le disque, le collecteur ou le CPU : c'est le mecanisme

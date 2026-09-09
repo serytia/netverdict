@@ -387,6 +387,33 @@ imagine ; l'execution reelle decrit celui qui existe.
   laisse eteints — on n'allume pas un journal complet pour une jointure.
 - v2 : capture pilotee des deux cotes (client ET serveur) et comparaison.
 
+## Rafales de journaux et fenetres de scan
+
+Un serveur tombe quelques minutes apres un scan de vulnerabilites. Tout le monde
+accuse le scan. Les journaux montrent une application en boucle d'erreur SQL a
+900 lignes par minute : c'est elle qui l'a fait tomber. netverdict lit les deux
+faits et, surtout, les place l'un par rapport a l'autre :
+
+```
+netverdict analyze loss.pcap --syslog central.log --syslog-tz UTC
+```
+
+* **Rafales de journaux** (`--syslog`) : un couple `(hote, programme)` qui ecrit
+  au moins 200 lignes par minute, et au moins 20 fois sa propre base. Affichee
+  avec son volume, sa duree, son pic et la ligne qui se repete.
+* **Fenetres de scan** (lues dans la capture seule, sans option) : un meme client
+  qui sonde 30 ports distincts ou plus d'un meme serveur en 120 s au plus,
+  majoritairement des SYN sans donnees. Affichee avec son **debut et sa fin** —
+  c'est la fin qui dedouane, et elle est aussi dans le JSON (`scans[].end`).
+* Quand les deux sont la, une ligne tranche : « le scan s'est termine 180 s avant
+  le debut de la rafale » ou « la rafale a commence pendant le scan ».
+
+Ni l'un ni l'autre n'est un verdict. Ce sont des suspects rattaches aux flux
+qu'ils pourraient plausiblement expliquer, et un scan termine avant le debut des
+ennuis est exactement ce que le rapport sert a montrer. Pour rejouer la demo avec
+une rafale dans le corpus : `python lab/gen_syslog_corpus.py --burst
+app-billing:900:-180` (desactivee par defaut).
+
 ## Licence
 
 GPL-2.0
