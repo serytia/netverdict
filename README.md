@@ -420,7 +420,10 @@ netverdict analyze loss.pcap --syslog central.log --syslog-tz UTC
 * When both are present, one line settles it: *"the scan ended 180 s before the
   burst started"* or *"the burst started while the scan was running"*. Without
   `--syslog-tz` the syslog hour is a guess, so that line rounds to the minute
-  (*"about 3 min ... (source time approximate)"*) instead of claiming seconds.
+  (*"about 3 min ... (source time approximate)"*) instead of claiming seconds,
+  and the overlap line carries the same marker (*"... while the scan was
+  running (source time approximate)"*): an overlap read on a guessed hour is a
+  likely coincidence, not a measurement.
 
 Neither is a verdict. Both are suspects attached to the flows they could plausibly
 explain, and a scan that ended before the trouble started is exactly what the

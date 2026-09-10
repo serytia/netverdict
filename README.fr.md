@@ -410,7 +410,9 @@ netverdict analyze loss.pcap --syslog central.log --syslog-tz UTC
   le debut de la rafale » ou « la rafale a commence pendant le scan ». Sans
   `--syslog-tz`, l'heure du syslog est devinee : la ligne s'arrondit alors a la
   minute (« environ 3 min ... (heure source approximative) ») plutot que
-  d'annoncer des secondes.
+  d'annoncer des secondes, et la ligne de chevauchement porte le meme marqueur
+  (« ... pendant le scan (heure source approximative) ») : un chevauchement lu
+  sur une heure devinee est une coincidence probable, pas une mesure.
 
 Ni l'un ni l'autre n'est un verdict. Ce sont des suspects rattaches aux flux
 qu'ils pourraient plausiblement expliquer, et un scan termine avant le debut des
