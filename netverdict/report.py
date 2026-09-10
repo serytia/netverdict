@@ -231,7 +231,13 @@ def scan_burst_summary(tl: Optional[Timeline],
     b = rafales[0]
     s = min(balayages, key=lambda e: abs(b.ts - e.end))
     if s.ts <= b.ts <= s.end:
-        return t("report.burst_during_scan", lang)
+        # « Pendant le scan » est la phrase la plus forte du rapport : elle
+        # date la rafale a l'interieur d'une fenetre de quelques secondes.
+        # Sur une heure syslog devinee, ce n'est qu'une coincidence probable,
+        # et elle porte le meme marqueur que la branche « avant » ci-dessous.
+        if b.tz_known and s.tz_known:
+            return t("report.burst_during_scan", lang)
+        return t("report.burst_during_scan_approx", lang)
     if s.end < b.ts:
         ecart = b.ts - s.end
         if b.tz_known and s.tz_known:

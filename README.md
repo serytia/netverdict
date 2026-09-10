@@ -224,7 +224,7 @@ timezone, one with the extras installed, one against the built package.
 
 ## Validation status
 
-- **Validated**: 501 automated tests, green on Linux, Windows and macOS
+- **Validated**: 553 automated tests, green on Linux, Windows and macOS
   (Python 3.11 to 3.13) and under a shifted timezone.
 - **Validated against a kernel**: 8 failure scenarios reproduced by a real
   Linux kernel (netem, iptables, real sockets — `lab/`), plus the auditd join
@@ -326,6 +326,7 @@ the tool you imagine; real execution describes the one that exists.
   you don't turn on a full journal for one join.
 - English output (`--lang en`) — done, see above.
 - DNS resolutions (done): see below.
+- Log bursts and scan windows (done): see below.
 - v2: capture driven from both sides (client AND server) and comparison.
 
 ## DNS: the time TCP cannot show you
@@ -419,7 +420,10 @@ netverdict analyze loss.pcap --syslog central.log --syslog-tz UTC
 * When both are present, one line settles it: *"the scan ended 180 s before the
   burst started"* or *"the burst started while the scan was running"*. Without
   `--syslog-tz` the syslog hour is a guess, so that line rounds to the minute
-  (*"about 3 min ... (source time approximate)"*) instead of claiming seconds.
+  (*"about 3 min ... (source time approximate)"*) instead of claiming seconds,
+  and the overlap line carries the same marker (*"... while the scan was
+  running (source time approximate)"*): an overlap read on a guessed hour is a
+  likely coincidence, not a measurement.
 
 Neither is a verdict. Both are suspects attached to the flows they could plausibly
 explain, and a scan that ended before the trouble started is exactly what the

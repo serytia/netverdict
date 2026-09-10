@@ -399,6 +399,14 @@ STRINGS: dict[str, dict[str, str]] = {
         "fr": "la rafale a commence pendant le scan",
         "en": "the burst started while the scan was running",
     },
+    # Meme phrase quand l'heure de la rafale est devinee (syslog sans
+    # --syslog-tz) : un chevauchement lu sur une heure fausse d'heures
+    # entieres n'est pas une mesure. Meme marqueur que la branche « avant ».
+    "report.burst_during_scan_approx": {
+        "fr": "la rafale a commence pendant le scan (heure source approximative)",
+        "en": "the burst started while the scan was running "
+              "(source time approximate)",
+    },
 
     # ---------------------------------------------------------- correlate.py
     "correlate.seconds": {
