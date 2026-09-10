@@ -282,6 +282,27 @@ def test_le_delta_suit_la_precision_de_la_source_syslog():
     assert "environ 1 min" in scan_burst_summary(court, "fr")
 
 
+def test_pendant_le_scan_porte_le_marqueur_quand_le_fuseau_est_devine():
+    """« Pendant le scan » date la rafale a l'interieur d'une fenetre de
+    quelques secondes : c'est la phrase la plus forte du rapport. Sans
+    --syslog-tz, l'heure de la rafale peut etre fausse d'heures entieres, et
+    le chevauchement n'est plus une mesure, c'est une coincidence probable.
+    Meme marqueur que la branche « avant » : sinon le meme rapport qualifie un
+    ecart de 3 min et affirme un chevauchement a la seconde, sur la meme heure
+    devinee. Fuseau connu : la phrase ne bouge pas d'un mot."""
+    sur = _tl(_balayage(1000.0, span=60.0), _rafale(1030.0))
+    flou = _tl(_balayage(1000.0, span=60.0), _rafale(1030.0, tz_known=False))
+
+    assert scan_burst_summary(sur, "fr") == "la rafale a commence pendant le scan"
+    assert scan_burst_summary(sur, "en") == ("the burst started while the scan "
+                                             "was running")
+    assert scan_burst_summary(flou, "fr") == ("la rafale a commence pendant le "
+                                              "scan (heure source approximative)")
+    assert scan_burst_summary(flou, "en") == ("the burst started while the scan "
+                                              "was running (source time "
+                                              "approximate)")
+
+
 def test_pas_de_phrase_quand_il_manque_un_des_deux_faits():
     """La synthese est une COMPARAISON : sans les deux termes, elle n'existe
     pas. Une phrase inventee ici vaudrait un faux temoignage."""
