@@ -224,7 +224,7 @@ timezone, one with the extras installed, one against the built package.
 
 ## Validation status
 
-- **Validated**: 501 automated tests, green on Linux, Windows and macOS
+- **Validated**: 553 automated tests, green on Linux, Windows and macOS
   (Python 3.11 to 3.13) and under a shifted timezone.
 - **Validated against a kernel**: 8 failure scenarios reproduced by a real
   Linux kernel (netem, iptables, real sockets — `lab/`), plus the auditd join
@@ -326,6 +326,7 @@ the tool you imagine; real execution describes the one that exists.
   you don't turn on a full journal for one join.
 - English output (`--lang en`) — done, see above.
 - DNS resolutions (done): see below.
+- Log bursts and scan windows (done): see below.
 - v2: capture driven from both sides (client AND server) and comparison.
 
 ## DNS: the time TCP cannot show you

@@ -290,7 +290,7 @@ un avec les extras installes, un sur le paquet construit.
 
 ## Statut de validation
 
-- **Valide** : 501 tests automatises, verts sur Linux, Windows et macOS
+- **Valide** : 553 tests automatises, verts sur Linux, Windows et macOS
   (Python 3.11 a 3.13) et sous fuseau decale.
 - **Valide au kernel** : 8 scenarios de panne reproduits par un vrai noyau
   Linux (netem, iptables, vraies sockets — `lab/`), plus la jointure auditd
@@ -385,6 +385,7 @@ imagine ; l'execution reelle decrit celui qui existe.
   defaut dans le Sysmon livre avec Windows 11 24H2. Les 21 autres types
   d'evenements y sont en `onmatch="include"` sans aucune regle, ce qui les
   laisse eteints — on n'allume pas un journal complet pour une jointure.
+- Rafales de journaux et fenetres de scan (fait) : voir plus bas.
 - v2 : capture pilotee des deux cotes (client ET serveur) et comparaison.
 
 ## Rafales de journaux et fenetres de scan
