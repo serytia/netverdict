@@ -216,6 +216,14 @@ def scan_burst_summary(tl: Optional[Timeline],
     proche. None quand il manque l'un des deux, ou quand la rafale precede
     entierement le scan : aucune des deux phrases ne serait vraie, et une phrase
     fausse ici couterait plus cher que le silence.
+
+    L'ecart affiche melange DEUX horloges : celle de la capture (epoch absolu)
+    et celle du syslog. Sans --syslog-tz, la seconde est une heure locale
+    devinee (`tz_known=False`, pose par syslog.py et propage par burst.py) :
+    on arrondit alors a la minute, exactement comme la preuve de rafale de
+    correlate.py. Sinon le meme rapport porterait deux phrases sur le MEME
+    fait, l'une prudente (« ~ 3 min ») et l'autre affirmative (« 180 s ») —
+    et c'est celle-ci qu'on recopie dans un post-mortem.
     """
     rafales, balayages = bursts_of(tl), scans_of(tl)
     if not rafales or not balayages:
@@ -225,7 +233,13 @@ def scan_burst_summary(tl: Optional[Timeline],
     if s.ts <= b.ts <= s.end:
         return t("report.burst_during_scan", lang)
     if s.end < b.ts:
-        return t("report.scan_before_burst", lang, d=b.ts - s.end)
+        ecart = b.ts - s.end
+        if b.tz_known and s.tz_known:
+            return t("report.scan_before_burst", lang, d=ecart)
+        # max(1, ...) : « 0 min » se lirait comme « en meme temps », qui est
+        # justement l'autre phrase.
+        return t("report.scan_before_burst_approx", lang,
+                 d=max(1, round(ecart / 60)))
     return None
 
 

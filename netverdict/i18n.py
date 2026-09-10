@@ -385,6 +385,16 @@ STRINGS: dict[str, dict[str, str]] = {
         "fr": "le scan s'est termine {d:.0f} s avant le debut de la rafale",
         "en": "the scan ended {d:.0f} s before the burst started",
     },
+    # Meme phrase quand l'heure de la rafale vient d'un syslog sans fuseau
+    # (RFC3164 sans --syslog-tz) : la minute, jamais la seconde. Meme
+    # convention que `correlate.minutes_approx`, sinon le meme rapport porte
+    # une preuve prudente et une synthese affirmative sur le MEME fait.
+    "report.scan_before_burst_approx": {
+        "fr": "le scan s'est termine environ {d} min avant le debut de la "
+              "rafale (heure source approximative)",
+        "en": "the scan ended about {d} min before the burst started "
+              "(source time approximate)",
+    },
     "report.burst_during_scan": {
         "fr": "la rafale a commence pendant le scan",
         "en": "the burst started while the scan was running",

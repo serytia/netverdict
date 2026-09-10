@@ -406,7 +406,10 @@ netverdict analyze loss.pcap --syslog central.log --syslog-tz UTC
   majoritairement des SYN sans donnees. Affichee avec son **debut et sa fin** —
   c'est la fin qui dedouane, et elle est aussi dans le JSON (`scans[].end`).
 * Quand les deux sont la, une ligne tranche : « le scan s'est termine 180 s avant
-  le debut de la rafale » ou « la rafale a commence pendant le scan ».
+  le debut de la rafale » ou « la rafale a commence pendant le scan ». Sans
+  `--syslog-tz`, l'heure du syslog est devinee : la ligne s'arrondit alors a la
+  minute (« environ 3 min ... (heure source approximative) ») plutot que
+  d'annoncer des secondes.
 
 Ni l'un ni l'autre n'est un verdict. Ce sont des suspects rattaches aux flux
 qu'ils pourraient plausiblement expliquer, et un scan termine avant le debut des

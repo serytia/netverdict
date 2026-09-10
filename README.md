@@ -417,7 +417,9 @@ netverdict analyze loss.pcap --syslog central.log --syslog-tz UTC
   SYNs with no data. Reported with its **start and end** — the end is what
   clears a scan, and it is in the JSON too (`scans[].end`).
 * When both are present, one line settles it: *"the scan ended 180 s before the
-  burst started"* or *"the burst started while the scan was running"*.
+  burst started"* or *"the burst started while the scan was running"*. Without
+  `--syslog-tz` the syslog hour is a guess, so that line rounds to the minute
+  (*"about 3 min ... (source time approximate)"*) instead of claiming seconds.
 
 Neither is a verdict. Both are suspects attached to the flows they could plausibly
 explain, and a scan that ended before the trouble started is exactly what the
