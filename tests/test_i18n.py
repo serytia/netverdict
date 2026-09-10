@@ -244,6 +244,33 @@ def test_pas_de_traduction_vide_dans_la_table():
     assert not vides, f"traductions vides: {vides}"
 
 
+# Cles dont l'absence de francais est voulue : le jeton reste tel quel en
+# francais (voir test_faible_reste_non_traduit_en_francais).
+SANS_FRANCAIS_VOULU = {"conf.faible"}
+
+
+def test_parite_fr_en_de_la_table():
+    """Une cle sans « en » retomberait sur le francais EN SILENCE via t() : un
+    lecteur anglophone trouverait une ligne de francais au milieu de son
+    rapport sans qu'aucun test ne rougisse. Meme panne muette pour un
+    placeholder present dans une langue et absent de l'autre : la valeur
+    disparait du rapport traduit. La table est verrouillee ici, pas dans un
+    inventaire tenu a la main."""
+    import string
+
+    def jetons(chaine):
+        return {nom for _, nom, _, _ in string.Formatter().parse(chaine) if nom}
+
+    sans_en = [cle for cle, e in STRINGS.items() if "en" not in e]
+    sans_fr = [cle for cle, e in STRINGS.items()
+               if "fr" not in e and cle not in SANS_FRANCAIS_VOULU]
+    differents = [cle for cle, e in STRINGS.items()
+                  if "fr" in e and "en" in e and jetons(e["fr"]) != jetons(e["en"])]
+    assert not sans_en, f"cles sans anglais: {sans_en}"
+    assert not sans_fr, f"cles sans francais: {sans_fr}"
+    assert not differents, f"placeholders differents fr/en: {differents}"
+
+
 # --- 5. Resolution de la langue --------------------------------------------
 
 def test_resolve_lang_precedence(monkeypatch):
