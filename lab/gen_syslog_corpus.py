@@ -105,16 +105,16 @@ tsl = dt.datetime.fromtimestamp(T0 - 122, dt.timezone.utc)
 lines.append((tsl.timestamp(), f"<28>{tsl.strftime('%b %d %H:%M:%S')} sw-core01 "
               f"ifplugd[812]: eth3: link down"))
 
-# parse_known_args et non parse_args : ce fichier est AUSSI execute par la suite
-# de tests via runpy.run_path(..., run_name="__main__"), donc avec le sys.argv de
-# pytest. Refuser ces arguments-la ferait echouer le test de non-regression du
-# corpus par defaut, qui est precisement la propriete que cette option ne doit
-# pas casser. Le prix est connu et assume : une option mal orthographiee est
-# ignoree en silence plutot que refusee.
+# parse_args et non parse_known_args : une option mal orthographiee doit etre
+# REFUSEE. Ce fichier est aussi execute par la suite de tests via
+# runpy.run_path(..., run_name="__main__") ; c'est a l'appelant de poser son
+# sys.argv (monkeypatch.setattr(sys, "argv", [chemin, ...])), pas au script
+# d'avaler celui de pytest. Un `--brust` ignore en silence rendrait la demo
+# muette au moment precis ou on la montre.
 _p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
 _p.add_argument("--burst", metavar="PROGRAM:LINES:OFFSET_S", default=None,
                 help="append a log burst (off by default)")
-_args, _ignores = _p.parse_known_args()
+_args = _p.parse_args()
 
 if _args.burst:
     lines += burst_lines(*parse_burst(_args.burst))

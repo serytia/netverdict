@@ -192,9 +192,14 @@ def test_le_corpus_du_lab_ne_produit_aucune_rafale(tmp_path, monkeypatch):
     """10 002 lignes reelles, 6 h, 400 erreurs reparties : c'est le corpus de
     la demo. S'il sortait une rafale, le seuil serait faux — et la demo
     mentirait avant meme d'etre montree."""
+    import sys
+
+    lab = LAB_DIR / "gen_syslog_corpus.py"
     monkeypatch.chdir(tmp_path)
-    mod = runpy.run_path(str(LAB_DIR / "gen_syslog_corpus.py"),
-                         run_name="__main__")
+    # Le script fait parse_args() : sans ce sys.argv, il verrait celui de
+    # pytest et refuserait de tourner. C'est voulu, cf. son commentaire.
+    monkeypatch.setattr(sys, "argv", [str(lab)])
+    mod = runpy.run_path(str(lab), run_name="__main__")
     corpus = tmp_path / "central.log"
     ancre = datetime.fromtimestamp(mod["T0"], timezone.utc)
     evs, st = syslog_src.parse(corpus, now=ancre, tz=timezone.utc)

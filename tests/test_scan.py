@@ -88,14 +88,14 @@ def _scans(chemin):
     return detect_scans(build_flows(read_capture(chemin)))
 
 
-def _rafale(ts, *, span=60.0, lines=900):
+def _rafale(ts, *, span=60.0, lines=900, tz_known=True):
     return BurstEvent(
         ts=ts, source="syslog", host="db01", category="burst", severity=2,
         ident="app",
         message=f"{lines} lines in {span:.0f} s (peak {lines}/min, "
                 f"baseline 5/min): ORA-00060: deadlock detected",
         end=ts + span, lines=lines, peak_per_min=lines, baseline_per_min=5,
-        sample="ORA-00060: deadlock detected")
+        sample="ORA-00060: deadlock detected", tz_known=tz_known)
 
 
 def _balayage(ts, *, span=60.0, ports=40):
@@ -244,6 +244,42 @@ def test_une_rafale_commencee_pendant_le_scan_le_dit():
                                             "le scan")
     assert scan_burst_summary(tl, "en") == ("the burst started while the scan "
                                             "was running")
+
+
+def test_le_delta_suit_la_precision_de_la_source_syslog():
+    """Les DEUX branches du meme fait, cote a cote. Le scan vient de la
+    capture (epoch absolu) ; la rafale vient du syslog, dont l'heure n'est
+    fiable que si --syslog-tz a ete donne.
+
+    Fuseau connu : la seconde, elle est mesuree. Fuseau inconnu : la minute et
+    le mot « approximative », comme la preuve de rafale de correlate.py. Une
+    seconde ferme sur une heure devinee serait un chiffre invente, et cette
+    phrase-la est celle qu'on recopie dans un post-mortem."""
+    import re
+
+    balayage = _balayage(1000.0, span=60.0)
+    sur = _tl(balayage, _rafale(1240.0))
+    flou = _tl(_balayage(1000.0, span=60.0), _rafale(1240.0, tz_known=False))
+
+    assert scan_burst_summary(sur, "fr") == ("le scan s'est termine 180 s "
+                                             "avant le debut de la rafale")
+    assert scan_burst_summary(sur, "en") == ("the scan ended 180 s before "
+                                             "the burst started")
+
+    for lang, attendu in (
+            ("fr", "le scan s'est termine environ 3 min avant le debut de la "
+                   "rafale (heure source approximative)"),
+            ("en", "the scan ended about 3 min before the burst started "
+                   "(source time approximate)")):
+        phrase = scan_burst_summary(flou, lang)
+        assert phrase == attendu
+        # Le non-comportement qui compte : plus aucune seconde affichee.
+        assert not re.search(r"\d+(?:\.\d+)? s\b", phrase), phrase
+
+    # Moins d'une minute d'ecart : « 0 min » se lirait comme « pendant le
+    # scan », qui est l'autre phrase. Le plancher tient a 1.
+    court = _tl(_balayage(1000.0, span=60.0), _rafale(1070.0, tz_known=False))
+    assert "environ 1 min" in scan_burst_summary(court, "fr")
 
 
 def test_pas_de_phrase_quand_il_manque_un_des_deux_faits():
